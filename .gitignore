@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Secrets / environment — NEVER commit these
+.env
+.env.*
+*.env
+.env.txt
+secrets.json
+
+# Database dumps & backups (may contain customer data / credentials)
+*.sql
+backup.sql
+dump.js
+
+# WhatsApp Baileys auth sessions (contain account credentials)
+wa-sessions/
+
+# Logs & runtime
+*.log
+npm-debug.log*
+logs/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+ruflo/
