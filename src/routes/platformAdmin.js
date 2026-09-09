@@ -198,7 +198,7 @@ router.get('/store-owners',authMiddleware(['platform_admin']),async(req,res)=>{t
     FROM store_owners so
     LEFT JOIN (SELECT owner_id, COUNT(*) cnt FROM stores GROUP BY owner_id) sc ON sc.owner_id=so.id
     LEFT JOIN (SELECT s.owner_id, COALESCE(SUM(o.total),0) total_revenue FROM orders o JOIN stores s ON s.id=o.store_id WHERE o.payment_status='paid' GROUP BY s.owner_id) rev ON rev.owner_id=so.id`;
-  const p=[];if(search){p.push(`%${search}%`);q+=' WHERE (so.full_name ILIKE $1 OR so.email ILIKE $1 OR so.phone ILIKE $1)';}q+=' ORDER BY so.created_at DESC';const r=await pool.query(q,p);const out={owners:r.rows.map(o=>({...o,name:o.full_name})),total:r.rows.length};cacheSet('owners:'+(search||''),out);res.json(out);}catch(e){res.status(500).json({error:e.message});}});
+  const p=[];if(search){p.push(`%${search}%`);q+=' WHERE (so.full_name ILIKE $1 OR so.email ILIKE $1 OR so.phone ILIKE $1)';}q+=' ORDER BY so.created_at DESC';const r=await pool.query(q,p);const out={owners:r.rows.map(({password_hash,reset_token,reset_token_expires,two_fa_code,two_fa_expires,otp_code,otp_expires,...o})=>({...o,name:o.full_name})),total:r.rows.length};cacheSet('owners:'+(search||''),out);res.json(out);}catch(e){res.status(500).json({error:e.message});}});
 router.patch('/store-owners/:id/toggle',authMiddleware(['platform_admin']),async(req,res)=>{try{const r=await pool.query('UPDATE store_owners SET is_active=NOT is_active,updated_at=NOW() WHERE id=$1 RETURNING *',[req.params.id]);res.json({...r.rows[0],name:r.rows[0].full_name});}catch(e){res.status(500).json({error:e.message});}});
 async function cascadeDeleteStores(client,storeIds){
   if(!storeIds.length)return;
@@ -218,7 +218,8 @@ router.get('/stores',authMiddleware(['platform_admin']),async(req,res)=>{try{
   try{
     // Aggregate products/orders ONCE each (grouped), then join — instead of 3
     // correlated subqueries per store row (which scaled with store count).
-    r=await pool.query(`SELECT s.*,so.full_name as owner_name,so.email as owner_email,so.phone as owner_phone,so.is_active as owner_active,so.subscription_status,
+    r=await pool.query(`SELECT s.id,s.owner_id,s.store_name,s.slug,s.logo_url,s.is_published,s.created_at,
+      so.full_name as owner_name,so.email as owner_email,so.phone as owner_phone,so.is_active as owner_active,so.subscription_status,
       COALESCE(pc.cnt,0) as product_count, COALESCE(oc.cnt,0) as order_count, COALESCE(oc.rev,0) as revenue
       FROM stores s
       LEFT JOIN store_owners so ON so.id=s.owner_id
@@ -227,7 +228,7 @@ router.get('/stores',authMiddleware(['platform_admin']),async(req,res)=>{try{
       ORDER BY s.created_at DESC`);
   }catch(e){
     console.error('[platform stores] full query failed, falling back:',e.message);
-    r=await pool.query("SELECT s.*,so.full_name as owner_name,so.email as owner_email,so.phone as owner_phone FROM stores s LEFT JOIN store_owners so ON so.id=s.owner_id ORDER BY s.created_at DESC");
+    r=await pool.query("SELECT s.id,s.owner_id,s.store_name,s.slug,s.logo_url,s.is_published,s.created_at,so.full_name as owner_name,so.email as owner_email,so.phone as owner_phone FROM stores s LEFT JOIN store_owners so ON so.id=s.owner_id ORDER BY s.created_at DESC");
   }
   const out=r.rows.map(s=>({...s,name:s.store_name,is_live:s.is_published!==false,logo:s.logo_url||s.logo||null}));cacheSet('stores',out);res.json(out);
 }catch(e){console.error('[platform stores]',e.message);res.status(500).json({error:e.message});}});
