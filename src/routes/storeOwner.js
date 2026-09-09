@@ -494,8 +494,30 @@ router.get('/stores/:sid',authMiddleware(['store_owner']),async(req,res)=>{try{
 }catch(e){res.status(500).json({error:e.message});}});
 
 router.get('/stores/:sid/dashboard',authMiddleware(['store_owner']),async(req,res)=>{try{const sid=req.params.sid;const store=await pool.query('SELECT * FROM stores WHERE id=$1 AND owner_id=$2',[sid,req.user.id]);if(!store.rows.length)return res.status(404).json({error:'Not found'});const full=await loadStore(sid);let to=0,tr=0,tp=0,tc=0,ro=[],sd=[];try{to=parseInt((await pool.query('SELECT COUNT(*) FROM orders WHERE store_id=$1',[sid])).rows[0].count);}catch(e){}try{tr=parseFloat((await pool.query("SELECT COALESCE(SUM(total),0) as t FROM orders WHERE store_id=$1 AND (payment_status='paid' OR status IN ('confirmed','preparing','shipped','delivered'))",[sid])).rows[0].t);}catch(e){}try{tp=parseInt((await pool.query('SELECT COUNT(*) FROM products WHERE store_id=$1',[sid])).rows[0].count);}catch(e){}try{tc=parseInt((await pool.query('SELECT COUNT(*) FROM customers WHERE store_id=$1',[sid])).rows[0].count);}catch(e){}try{ro=(await pool.query('SELECT * FROM orders WHERE store_id=$1 ORDER BY created_at DESC LIMIT 10',[sid])).rows;}catch(e){}try{sd=(await pool.query("SELECT DATE(created_at) as date,COUNT(*) as orders,COALESCE(SUM(total),0) as revenue FROM orders WHERE store_id=$1 AND created_at>NOW()-INTERVAL '30 days' GROUP BY DATE(created_at) ORDER BY date",[sid])).rows;}catch(e){}
+// Real period-over-period deltas. The dashboard used to print hard-coded
+// "+8.2%" style figures next to every card, which read as growth even for a
+// store with zero of everything. Compare the last 30 days against the 30
+// before that and let the client decide what to show.
+let trend={};
+try{
+  const paidFilter="(payment_status='paid' OR status IN ('confirmed','preparing','shipped','delivered'))";
+  const q=await pool.query(`SELECT
+      COUNT(*) FILTER (WHERE created_at >= NOW()-INTERVAL '30 days') AS orders_cur,
+      COUNT(*) FILTER (WHERE created_at >= NOW()-INTERVAL '60 days' AND created_at < NOW()-INTERVAL '30 days') AS orders_prev,
+      COALESCE(SUM(total) FILTER (WHERE created_at >= NOW()-INTERVAL '30 days' AND ${paidFilter}),0) AS revenue_cur,
+      COALESCE(SUM(total) FILTER (WHERE created_at >= NOW()-INTERVAL '60 days' AND created_at < NOW()-INTERVAL '30 days' AND ${paidFilter}),0) AS revenue_prev
+    FROM orders WHERE store_id=$1`,[sid]);
+  const d=q.rows[0]||{};
+  const oc=parseInt(d.orders_cur)||0, op=parseInt(d.orders_prev)||0;
+  const rc=parseFloat(d.revenue_cur)||0, rp=parseFloat(d.revenue_prev)||0;
+  trend={
+    orders:{current:oc,previous:op},
+    revenue:{current:rc,previous:rp},
+    avgOrderValue:{current:oc?rc/oc:0,previous:op?rp/op:0},
+  };
+}catch(e){}
 let itemsByOrder={};try{const ids=ro.map(o=>o.id);if(ids.length){const ir=await pool.query("SELECT oi.order_id,oi.product_id,oi.product_name,oi.product_image,oi.quantity,oi.unit_price,oi.total_price,p.images AS p_images FROM order_items oi LEFT JOIN products p ON p.id=oi.product_id WHERE oi.order_id=ANY($1::uuid[])",[ids]);for(const it of ir.rows){let img=it.product_image||null;if(!img){try{const imgs=Array.isArray(it.p_images)?it.p_images:(typeof it.p_images==='string'?JSON.parse(it.p_images||'[]'):[]);img=imgs[0]||null;}catch(e){}}(itemsByOrder[it.order_id]=itemsByOrder[it.order_id]||[]).push({product_id:it.product_id,product_name:it.product_name,quantity:it.quantity,price:it.unit_price,total_price:it.total_price,image:img});}}}catch(e){console.error('[dashboard items]',e.message);}
-res.json({store:full,stats:{totalOrders:to,totalRevenue:tr,totalProducts:tp,totalCustomers:tc,storeVisits:full.total_visits||0},recentOrders:ro.map(o=>{let _c=full.config||{};if(typeof _c==='string'){try{_c=JSON.parse(_c);}catch{_c={};}}return{...o,order_number:formatOrderNumber(o.order_number,_c),items:itemsByOrder[o.id]||[],first_image:(itemsByOrder[o.id]||[]).find(i=>i.image)?.image||null};}),salesData:sd});}catch(e){res.status(500).json({error:e.message});}});
+res.json({store:full,stats:{totalOrders:to,totalRevenue:tr,totalProducts:tp,totalCustomers:tc,storeVisits:full.total_visits||0},trend,recentOrders:ro.map(o=>{let _c=full.config||{};if(typeof _c==='string'){try{_c=JSON.parse(_c);}catch{_c={};}}return{...o,order_number:formatOrderNumber(o.order_number,_c),items:itemsByOrder[o.id]||[],first_image:(itemsByOrder[o.id]||[]).find(i=>i.image)?.image||null};}),salesData:sd});}catch(e){res.status(500).json({error:e.message});}});
 
 // UPDATE STORE — saves DB columns + extra fields in config JSONB
 router.put('/stores/:sid',authMiddleware(['store_owner']),async(req,res)=>{try{
