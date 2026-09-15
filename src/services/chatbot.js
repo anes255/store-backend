@@ -360,12 +360,14 @@ function buildPrompt(s, lang) {
     ar: 'STRICT LANGUAGE RULE: You MUST respond ONLY in Modern Standard Arabic. Every word must be Arabic. NEVER use French or English words. NEVER switch language.',
     fr: 'STRICT LANGUAGE RULE: Tu DOIS répondre UNIQUEMENT en français. Chaque mot doit être en français. Ne change JAMAIS de langue. Ne mélange JAMAIS avec l\'anglais ou l\'arabe.',
     en: 'STRICT LANGUAGE RULE: You MUST respond ONLY in English. Every word must be English. NEVER switch to French or Arabic. NEVER mix languages.',
-    auto: 'STRICT LANGUAGE RULE: You MUST respond ONLY in English. Every word must be English. NEVER switch languages mid-conversation.'
+    // 'auto' used to mean English, so a buyer browsing the store in Arabic or
+    // French got English replies. It now mirrors the customer's own language.
+    auto: 'STRICT LANGUAGE RULE: Reply in exactly the same language the customer used in their latest message (Arabic, French, English or Algerian Darja). Never switch to a different language.'
   };
   const pays = [s.enable_cod && 'Cash on Delivery', s.enable_ccp && 'CCP Transfer', s.enable_baridimob && 'BaridiMob'].filter(Boolean);
   return `You are a professional customer support chatbot for "${s.name || s.store_name}", an online store in Algeria.
 
-${l[lang] || l.en}
+${l[lang] || l.auto}
 YOU MUST MAINTAIN THIS LANGUAGE FOR YOUR ENTIRE RESPONSE. DO NOT SWITCH MID-SENTENCE.
 
 STORE INFORMATION (public, you can share this):

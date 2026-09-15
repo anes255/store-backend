@@ -498,6 +498,8 @@ async function carrierCreateOrder(rawCfg, order, items) {
     payment_method: order.payment_method || 'cod',
     notes: order.notes || '',
     item_count: String(itemCount),
+    // Any fragile line makes the whole parcel fragile for the courier.
+    fragile: (items || []).some(i => i.is_fragile === true || i.is_fragile === 't' || i.is_fragile === 1) ? '1' : '0',
     product_list: productList,
     weight: String(weightNum),
   };
@@ -528,6 +530,7 @@ async function carrierCreateOrder(rawCfg, order, items) {
       stock: 0,
       quantite: String(subs.item_count),
       can_open: 1,
+      fragile: subs.fragile === '1' ? 1 : 0,
     };
     // Always send wilaya_id + commune (zip_code unreliable on NOEST)
     noestBody.wilaya_id = parseInt(subs.wilaya_code) || 16;
@@ -580,7 +583,7 @@ async function carrierCreateOrder(rawCfg, order, items) {
       poids: parseFloat(subs.weight) || 1,
       weight: subs.weight,
       can_open: 1,
-      fragile: 0,
+      fragile: subs.fragile === '1' ? 1 : 0,
     };
     body = JSON.stringify(ecoBody);
   } else {
@@ -686,6 +689,13 @@ async function carrierCreateOrder(rawCfg, order, items) {
     // also match station_code errors here, not just "desk unavailable", to make
     // sure the parcel still gets sent (as home) instead of failing entirely.
     const deskRejected = /desk.*indisponible|desk.*disponible|desk.*not.?available|stop.?desk.*not.?available|stop.?desk.*invalid|aucun.*bureau|no.*stop.?desk|stop.?desk.*unavailable|bureau.*indispo|bureau.*ferm|station[_\s]?code|station.*(invalid|introuvable|requis|required|manquant)|desk.*requis/i.test(txt);
+    // The home-delivery fallback is kept ONLY for NOEST, where a missing
+    // station would otherwise lose the parcel entirely. For DHD / EcoTrack and
+    // the rest it silently turned stop-desk orders into domicile ones on the
+    // carrier's side — so there we report the rejection instead.
+    if (r && (r.status === 422 || r.status === 400) && deskRejected && carrier !== 'noest') {
+      return { ok: false, err: `${carrier === 'ecotrack' ? 'The carrier' : carrier} refused stop-desk delivery for this commune: ${String(txt).slice(0, 200)}. The order was NOT sent as home delivery — change the delivery type or commune and retry.`, status: r.status, tried, delivery_mode: 'desk_rejected' };
+    }
     if (r && (r.status === 422 || r.status === 400) && deskRejected) {
       try {
         {

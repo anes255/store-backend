@@ -160,7 +160,7 @@ router.post('/:slug/customers/register',async(req,res)=>{try{const store=(await 
   if(ownerDup.rows.length)return res.status(409).json({error:'This phone or email belongs to a store admin. Please use a different one.'});
   const paDup=await pool.query("SELECT 1 FROM platform_admins WHERE phone=$1 OR (email IS NOT NULL AND email=$2) LIMIT 1",[phone,email||null]).catch(()=>({rows:[]}));
   if(paDup.rows.length)return res.status(409).json({error:'This phone or email belongs to a platform admin. Please use a different one.'});
-  const dup=await pool.query('SELECT id FROM customers WHERE store_id=$1 AND phone=$2',[store.id,phone]);if(dup.rows.length)return res.status(409).json({error:'Phone registered'});const hash=await bcrypt.hash(password,12);const r=await pool.query('INSERT INTO customers(store_id,full_name,email,phone,password_hash,address,city,wilaya) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,full_name,email,phone,address,city,wilaya',[store.id,name,email||null,phone,hash,address||null,city||null,wilaya||null]);const c=r.rows[0];const token=generateToken({id:c.id,role:'customer',storeId:store.id,name:c.full_name});res.status(201).json({token,customer:{id:c.id,name:c.full_name,email:c.email,phone:c.phone,address:c.address,city:c.city,wilaya:c.wilaya}});}catch(e){res.status(500).json({error:e.message});}});
+  const dup=await pool.query('SELECT id FROM customers WHERE store_id=$1 AND phone=$2',[store.id,phone]);if(dup.rows.length)return res.status(409).json({error:'Phone registered'});const hash=await bcrypt.hash(password,12);const r=await pool.query('INSERT INTO customers(store_id,full_name,email,phone,password_hash,address,city,wilaya) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,full_name,email,phone,address,city,wilaya',[store.id,name,email||null,phone,hash,address||null,city||null,wilaya||null]);const c=r.rows[0];const token=generateToken({id:c.id,role:'customer',storeId:store.id,name:c.full_name});try{const{notifyStore}=require('../services/notify');notifyStore(store.id,{type:'customer',title:`New customer: ${name||phone}`,message:phone||'',link:'/dashboard/customers'});}catch(e){}res.status(201).json({token,customer:{id:c.id,name:c.full_name,email:c.email,phone:c.phone,address:c.address,city:c.city,wilaya:c.wilaya}});}catch(e){res.status(500).json({error:e.message});}});
 
 // Customer login
 router.post('/:slug/customers/login',async(req,res)=>{try{const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.status(404).json({error:'Not found'});const{phone,password}=req.body;const c=(await pool.query('SELECT * FROM customers WHERE store_id=$1 AND phone=$2',[store.id,phone])).rows[0];if(!c)return res.status(401).json({error:'Invalid'});if(!(await bcrypt.compare(password,c.password_hash)))return res.status(401).json({error:'Invalid'});const token=generateToken({id:c.id,role:'customer',storeId:store.id,name:c.full_name});res.json({token,customer:{id:c.id,name:c.full_name,email:c.email,phone:c.phone,address:c.address||null,city:c.city||null,wilaya:c.wilaya||null}});}catch(e){res.status(500).json({error:e.message});}});
@@ -284,8 +284,8 @@ if (custId) {
 }
 // Auto-create notification for store owner — skip for pending_payment (receipt not yet submitted)
 if(initialStatus!=='pending_payment'){
-try{await pool.query("INSERT INTO notifications(store_id,type,title,message,link) VALUES($1,'order',$2,$3,$4)",[sid,`New order #${num}`,`${customer_name} placed an order for ${total} ${store.currency||'DZD'}`,'/dashboard/orders']);}catch(e){}
-try{const{sendStorePush}=require('./storeOwner');sendStorePush(sid,`New order #${num}`,`${customer_name} — ${total} ${store.currency||'DZD'}`);}catch(e){}
+try{const{notifyStore}=require('../services/notify');const _first=oi[0]||{};const _more=oi.length>1?` +${oi.length-1}`:'';notifyStore(sid,{type:'order',title:`${_first.product_name||'Order'}${_more}`,message:`${Number(total).toLocaleString()} ${store.currency||'DZD'} · #${num}`,image:_first.product_image||null,link:'/dashboard/orders'});}catch(e){}
+// (push is sent by notifyStore above)
 // Send WhatsApp notification to buyer for new order
 try{
   const pref=(notification_preference||'whatsapp').toUpperCase();
@@ -316,7 +316,19 @@ for(const it of oi){try{
   }else{
     await pool.query('UPDATE products SET stock_quantity=GREATEST(0,COALESCE(stock_quantity,0)-$1) WHERE id=$2',[it.quantity,it.product_id]);
   }
+  // Tell the owner once, at the moment stock crosses the low-stock threshold.
+  try{
+    const lowAt=parseInt(storeCfg.low_stock_threshold)||5;
+    const now=(await pool.query('SELECT name,stock_quantity,images FROM products WHERE id=$1',[it.product_id])).rows[0];
+    const left=parseInt(now?.stock_quantity);
+    if(now&&Number.isFinite(left)&&left<=lowAt&&left+(parseInt(it.quantity)||1)>lowAt){
+      let im=now.images;if(typeof im==='string'){try{im=JSON.parse(im);}catch{im=[];}}
+      const{notifyStore}=require('../services/notify');
+      notifyStore(sid,{type:'stock',title:`Low stock: ${now.name}`,message:`${left} left`,image:Array.isArray(im)&&typeof im[0]==='string'?im[0]:null,link:'/dashboard/stock'});
+    }
+  }catch(e){}
 }catch(e){}}
+try{await pool.query('UPDATE order_items SET is_fragile=TRUE WHERE order_id=$1 AND product_id IN (SELECT id FROM products WHERE is_fragile=TRUE)',[o.rows[0].id]);}catch(e){}
 // Mark any abandoned carts for this customer as recovered
 try{await pool.query('UPDATE carts SET is_recovered=TRUE,updated_at=NOW() WHERE store_id=$1 AND customer_phone=$2 AND is_recovered=FALSE',[sid,customer_phone]);}catch(e){}
 res.status(201).json({...o.rows[0],order_number:formatOrderNumber(num,storeCfg),items:oi,item_count:oi.reduce((s,i)=>s+(parseInt(i.quantity)||0),0)});}catch(e){console.error(e);res.status(500).json({error:e.message});}});
@@ -510,6 +522,10 @@ router.get('/:slug/track',async(req,res)=>{try{
     );
   }
   const scfg=scfgEarly;
+  // Settings -> Tracking: hide delivered orders older than N days (0 = show all).
+  {const hideDays=parseInt(scfg.tracking_hide_delivered_days)||0;
+   if(hideDays>0){const cutoff=Date.now()-hideDays*86400000;
+     orders.rows=orders.rows.filter(o=>!(o.status==='delivered'&&new Date(o.delivered_at||o.created_at).getTime()<cutoff));}}
   // Attach order_items so the public track page can show each ordered product
   const orderIds=orders.rows.map(o=>o.id);
   let itemsByOrder={};

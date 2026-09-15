@@ -203,7 +203,7 @@ router.patch('/stores/:sid/orders/:oid/status',authMiddleware(['store_owner','st
   try{await pool.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS prepared_by VARCHAR(64)");}catch{}
   try{await pool.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT");}catch{}
   try{await pool.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_status VARCHAR(20)");}catch{}
-  const{status,cancel_reason}=req.body;let extra='';const p=[status,req.params.oid,req.params.sid];if(status==='shipped')extra=',shipped_at=NOW()';if(status==='delivered')extra=",delivered_at=NOW(),payment_status=CASE WHEN payment_method='cod' THEN 'paid' ELSE payment_status END";if(status==='cancelled'){extra=',cancelled_at=NOW()';if(cancel_reason){p.push(cancel_reason);extra+=`,cancel_reason=$${p.length}`;}}if(status==='confirmed'){p.push(String(req.user.id));extra+=`,confirmed_at=NOW(),confirmed_by=$${p.length}`;}if(status==='preparing'){p.push(String(req.user.id));extra+=`,prepared_at=NOW(),prepared_by=$${p.length}`;}const r=await pool.query(`UPDATE orders SET status=$1,updated_at=NOW()${extra} WHERE id=$2 AND store_id=$3 RETURNING *`,p);if(!r.rows.length)return res.status(404).json({error:'Not found'});
+  const{status,cancel_reason}=req.body;let extra='';const p=[status,req.params.oid,req.params.sid];if(status==='shipped')extra=',shipped_at=NOW()';if(status==='delivered')extra=",delivered_at=NOW(),payment_status=CASE WHEN payment_method='cod' THEN 'paid' ELSE payment_status END";if(status==='cancelled'){extra=',cancelled_at=NOW()';if(cancel_reason){p.push(cancel_reason);extra+=`,cancel_reason=$${p.length}`;}}if(status==='confirmed'){p.push(String(req.user.id));extra+=`,confirmed_at=NOW(),confirmed_by=$${p.length}`;}if(status==='preparing'){p.push(String(req.user.id));extra+=`,prepared_at=NOW(),prepared_by=$${p.length}`;}const r=await pool.query(`UPDATE orders SET status=$1,updated_at=NOW()${extra} WHERE id=$2 AND store_id=$3 RETURNING *`,p);try{const{notifyStore,statusLabel}=require('../services/notify');const _o=r.rows[0];if(_o&&status!=='new_order')notifyStore(req.params.sid,{type:'status',title:`Order #${_o.order_number} → ${statusLabel(status)}`,message:_o.customer_name||'',link:'/dashboard/orders'});}catch(e){}if(!r.rows.length)return res.status(404).json({error:'Not found'});
 
   // Send notifications to customer on EVERY status change
   try{
@@ -739,7 +739,9 @@ router.post('/stores/:sid/orders/:oid/dispatch',authMiddleware(['store_owner','s
     return res.json({ok:false,error:`Commune is required by ${dc.name}. Please set the commune/city on this order before dispatching.`});
   }
 
-  const items=(await pool.query('SELECT * FROM order_items WHERE order_id=$1',[order.id])).rows;
+  // Pull is_fragile from the product too, so orders placed before the column
+  // existed still tell the courier the parcel is fragile.
+  const items=(await pool.query('SELECT oi.*, (COALESCE(oi.is_fragile,FALSE) OR COALESCE(p.is_fragile,FALSE)) AS is_fragile FROM order_items oi LEFT JOIN products p ON p.id=oi.product_id WHERE oi.order_id=$1',[order.id])).rows;
   // For CCP/BaridiMob orders the buyer already paid the product price to the store.
   // The carrier should only collect shipping fees (COD = 0 or shipping only).
   const isPrePaid=['ccp','baridimob','bank_transfer'].includes((order.payment_method||'').toLowerCase());
@@ -888,15 +890,8 @@ router.post('/stores/:sid/delivery-companies/:did/sync',authMiddleware(['store_o
           [ourStatus,stRaw||null,dc.id,tracking,externalId,existing.id]
         );
         updated++;
-      }else{
-        const num=parseInt((await pool.query('SELECT COALESCE(MAX(order_number),0)+1 as n FROM orders WHERE store_id=$1',[req.params.sid])).rows[0].n);
-        await pool.query(
-          `INSERT INTO orders(store_id,order_number,customer_name,customer_phone,shipping_address,shipping_city,shipping_wilaya,total,subtotal,shipping_cost,discount,payment_method,status,tracking_status,tracking_number,delivery_company_id,source,external_id,created_at,updated_at)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,0,0,$10,$11,$12,$13,$14,$15,$16,$17,NOW())`,
-          [req.params.sid,num,name||'(carrier import)',phone||null,address||null,commune||null,wilaya||null,total,total,'cod',ourStatus,stRaw||null,tracking,dc.id,'carrier_'+host,externalId,createdAt||new Date()]
-        );
-        inserted++;
       }
+      // Unmatched carrier parcels are no longer turned into (blank) orders.
     }
     res.json({ok:true,synced:list.length,inserted,updated,message:`Synced ${list.length} parcels from ${dc.name} (${inserted} new, ${updated} updated).`});
   }catch(e){console.error('[carrier sync]',e.message);res.status(500).json({ok:false,error:e.message||'Sync failed'});}

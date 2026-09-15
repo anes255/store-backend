@@ -485,6 +485,33 @@ router.get('/stores',authMiddleware(['store_owner']),async(req,res)=>{try{const 
     if(Array.isArray(cfg.landing_pages))cfg.landing_pages=cfg.landing_pages.map(lp=>{if(lp&&typeof lp.ai_html==='string'&&lp.ai_html.length>900000){const{ai_html,...rest}=lp;return{...rest,ai_html:'',has_ai_html:true,too_large:true};}return lp;});
     out.push({...cfg,...s,name:s.store_name,is_live:s.is_published,logo:s.logo_url,favicon:s.favicon_url,hero_title:s.hero_title,hero_subtitle:s.hero_subtitle,product_count:s.product_count,order_count:s.order_count,enable_cod:pay.cod_enabled,enable_ccp:pay.ccp_enabled,ccp_account:pay.ccp_account,ccp_name:pay.ccp_name,enable_baridimob:pay.baridimob_enabled,baridimob_rip:pay.baridimob_rip,enable_bank_transfer:pay.bank_transfer_enabled,bank_name:pay.bank_name,bank_account:pay.bank_account,bank_rib:pay.bank_rib});}res.json(out);}catch(e){res.status(500).json({error:e.message});}});
 
+// Delete a store permanently (owner only). The client must echo the store's
+// exact name, so a stray click can never wipe a shop. Every per-store table is
+// cleared inside one transaction; each delete runs under a savepoint so a table
+// that does not exist on this database cannot abort the whole operation.
+router.delete('/stores/:sid',authMiddleware(['store_owner']),async(req,res)=>{
+  const client=await pool.connect();
+  try{
+    const sid=req.params.sid;
+    const st=(await client.query('SELECT id,store_name FROM stores WHERE id=$1 AND owner_id=$2',[sid,req.user.id])).rows[0];
+    if(!st)return res.status(404).json({error:'Store not found'});
+    const typed=String(req.body?.confirm_name||'').trim();
+    if(!typed||typed!==String(st.store_name||'').trim())return res.status(400).json({error:'Type the store name exactly to confirm deletion'});
+    await client.query('BEGIN');
+    const del=async(sql,params)=>{await client.query('SAVEPOINT sp');try{await client.query(sql,params);await client.query('RELEASE SAVEPOINT sp');}catch{await client.query('ROLLBACK TO SAVEPOINT sp');}};
+    for(const t of ['payment_receipts','blacklist','message_log','expenses','store_pages','notifications','push_subscriptions','reviews','carts','store_domains','shipping_wilayas','delivery_companies','categories','customers','store_status_templates','coupons','store_staff','activity_log']){
+      await del(`DELETE FROM ${t} WHERE store_id=$1`,[sid]);
+    }
+    await del('DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE store_id=$1)',[sid]);
+    await del('DELETE FROM orders WHERE store_id=$1',[sid]);
+    await del('DELETE FROM products WHERE store_id=$1',[sid]);
+    await client.query('DELETE FROM stores WHERE id=$1 AND owner_id=$2',[sid,req.user.id]);
+    await client.query('COMMIT');
+    res.json({ok:true});
+  }catch(e){try{await client.query('ROLLBACK');}catch{}res.status(500).json({error:e.message});}
+  finally{client.release();}
+});
+
 // Single store fetch (full data including payment settings)
 router.get('/stores/:sid',authMiddleware(['store_owner']),async(req,res)=>{try{
   const sid=req.params.sid;

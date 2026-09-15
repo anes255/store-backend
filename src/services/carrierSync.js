@@ -89,15 +89,10 @@ async function syncCarrierOrders(storeId, dc) {
         [ourStatus, stRaw || null, dc.id, JSON.stringify(p), tracking, externalId, existing.id, name||'', phone||'', wilaya||'', commune||'', address||'']
       );
       updated++;
-    } else {
-      const num = parseInt((await pool.query('SELECT COALESCE(MAX(order_number),0)+1 as n FROM orders WHERE store_id=$1', [storeId])).rows[0].n);
-      await pool.query(
-        `INSERT INTO orders(store_id,order_number,customer_name,customer_phone,shipping_address,shipping_city,shipping_wilaya,total,subtotal,shipping_cost,discount,payment_method,status,tracking_status,tracking_number,delivery_company_id,source,external_id,carrier_data,created_at,updated_at)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,0,0,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18,NOW())`,
-        [storeId, num, name || '(carrier import)', phone || null, address || null, commune || null, wilaya || null, total, total, 'cod', ourStatus, stRaw || null, tracking, dc.id, 'carrier_sync', externalId, JSON.stringify(p), createdAt || new Date()]
-      );
-      inserted++;
     }
+    // Parcels with no matching local order are NOT imported any more: they have
+    // no products and usually no customer data, and surfaced as blank
+    // "(carrier import)" rows in the orders list.
   }
 
   await pool.query('UPDATE delivery_companies SET last_synced_at=NOW() WHERE id=$1', [dc.id]);
@@ -135,6 +130,13 @@ async function updateTracking(storeId, order, dc) {
       'UPDATE orders SET tracking_status=$1,status=$2,carrier_data=$3::jsonb,tracking_updated_at=NOW(),updated_at=NOW() WHERE id=$4',
       [normalized, ourStatus, JSON.stringify(data), order.id]
     );
+    // Tell the owner when the courier moves the order to a new status.
+    if (ourStatus && ourStatus !== order.status) {
+      try {
+        const { notifyStore, statusLabel } = require('./notify');
+        notifyStore(storeId, { type: 'status', title: `Order #${order.order_number} → ${statusLabel(ourStatus)}`, message: order.customer_name || '', link: '/dashboard/orders' });
+      } catch {}
+    }
     return { status: normalized, raw: extractedStatus, history };
   }
   return null;
@@ -158,7 +160,7 @@ async function autoDispatchOrder(storeId, orderId, dcId) {
       return { ok: true, tracking_number: null };
     }
 
-    const items = (await pool.query('SELECT * FROM order_items WHERE order_id=$1', [orderId])).rows;
+    const items = (await pool.query('SELECT oi.*, (COALESCE(oi.is_fragile,FALSE) OR COALESCE(p.is_fragile,FALSE)) AS is_fragile FROM order_items oi LEFT JOIN products p ON p.id=oi.product_id WHERE oi.order_id=$1', [orderId])).rows;
     const result = await carrierCreateOrder(dc, order, items);
     if (result.ok) {
       const tn = result.tracking_number || '';

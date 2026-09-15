@@ -465,6 +465,21 @@ const initDb=async()=>{
     try{await pool.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS source VARCHAR(40)");}catch(e){}
     try{await pool.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS external_id VARCHAR(120)");}catch(e){}
     console.log('✅ delivery_companies columns ready');
+    // Fragile products: flagged on the product, copied onto each order line,
+    // shown on the receipt and passed to the delivery company.
+    try{await pool.query("ALTER TABLE products ADD COLUMN IF NOT EXISTS is_fragile BOOLEAN DEFAULT FALSE");}catch(e){}
+    try{await pool.query("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS is_fragile BOOLEAN DEFAULT FALSE");}catch(e){}
+    // Thumbnail shown next to an order notification in the dashboard bell.
+    try{await pool.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS image TEXT");}catch(e){}
+    // One-off cleanup: hide the empty orders earlier carrier syncs created.
+    // Soft delete (is_deleted) so they stay recoverable from the vault view.
+    try{await pool.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE");}catch(e){}
+    try{const r=await pool.query(`UPDATE orders o SET is_deleted=TRUE
+      WHERE (o.is_deleted IS NOT TRUE)
+        AND (o.source LIKE 'carrier%' OR o.customer_name='(carrier import)')
+        AND NOT EXISTS (SELECT 1 FROM order_items oi WHERE oi.order_id=o.id)
+        AND (COALESCE(o.customer_phone,'')='' OR o.customer_name='(carrier import)')`);
+      if(r.rowCount)console.log('🧹 hid',r.rowCount,'blank carrier-import orders');}catch(e){console.log('blank order cleanup:',e.message);}
 
     // ═══ NEW: Product reviews table ═══
     try{await pool.query(`CREATE TABLE IF NOT EXISTS reviews(
