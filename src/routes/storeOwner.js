@@ -546,6 +546,83 @@ try{
 let itemsByOrder={};try{const ids=ro.map(o=>o.id);if(ids.length){const ir=await pool.query("SELECT oi.order_id,oi.product_id,oi.product_name,oi.product_image,oi.quantity,oi.unit_price,oi.total_price,p.images AS p_images FROM order_items oi LEFT JOIN products p ON p.id=oi.product_id WHERE oi.order_id=ANY($1::uuid[])",[ids]);for(const it of ir.rows){let img=it.product_image||null;if(!img){try{const imgs=Array.isArray(it.p_images)?it.p_images:(typeof it.p_images==='string'?JSON.parse(it.p_images||'[]'):[]);img=imgs[0]||null;}catch(e){}}(itemsByOrder[it.order_id]=itemsByOrder[it.order_id]||[]).push({product_id:it.product_id,product_name:it.product_name,quantity:it.quantity,price:it.unit_price,total_price:it.total_price,image:img});}}}catch(e){console.error('[dashboard items]',e.message);}
 res.json({store:full,stats:{totalOrders:to,totalRevenue:tr,totalProducts:tp,totalCustomers:tc,storeVisits:full.total_visits||0},trend,recentOrders:ro.map(o=>{let _c=full.config||{};if(typeof _c==='string'){try{_c=JSON.parse(_c);}catch{_c={};}}return{...o,order_number:formatOrderNumber(o.order_number,_c),items:itemsByOrder[o.id]||[],first_image:(itemsByOrder[o.id]||[]).find(i=>i.image)?.image||null};}),salesData:sd});}catch(e){res.status(500).json({error:e.message});}});
 
+// ANALYTICS — everything the Analytics page charts, computed over ALL of the
+// store's orders in the chosen range. The page used to derive its pie chart
+// and top products from the dashboard's 10 most recent orders and its line
+// chart from a fixed 30-day series with timestamp keys, so the charts were
+// mostly empty or wrong. Buckets are zero-filled so the line is continuous.
+router.get('/stores/:sid/analytics',authMiddleware(['store_owner']),async(req,res)=>{try{
+  const sid=req.params.sid;
+  // Only the order-number settings from config — the full config carries
+  // inline images and made this lookup take seconds.
+  const own=await pool.query(`SELECT s.id,
+      jsonb_build_object('order_prefix',s.config->'order_prefix','order_suffix',s.config->'order_suffix',
+        'order_start_number',s.config->'order_start_number','order_pad_length',s.config->'order_pad_length') AS config
+    FROM stores s WHERE s.id=$1 AND s.owner_id=$2`,[sid,req.user.id]);
+  if(!own.rows.length)return res.status(404).json({error:'Not found'});
+  let visitsRaw=0;
+  try{visitsRaw=(await pool.query('SELECT total_visits FROM stores WHERE id=$1',[sid])).rows[0]?.total_visits;}catch{}
+  const RANGES={'7d':'7 days','30d':'30 days','3m':'3 months','6m':'6 months','1y':'1 year'};
+  const range=(RANGES[req.query.range]||req.query.range==='all')?req.query.range:'30d';
+  let start;
+  if(range==='all'){
+    const m=await pool.query("SELECT MIN(created_at) AS m FROM orders WHERE store_id=$1 AND is_deleted IS NOT TRUE",[sid]);
+    start=m.rows[0].m||new Date(Date.now()-29*864e5);
+  }else{
+    const d=new Date();
+    if(range==='7d')d.setDate(d.getDate()-7);else if(range==='30d')d.setDate(d.getDate()-30);
+    else if(range==='3m')d.setMonth(d.getMonth()-3);else if(range==='6m')d.setMonth(d.getMonth()-6);
+    else d.setFullYear(d.getFullYear()-1);
+    start=d;
+  }
+  const days=(Date.now()-new Date(start).getTime())/864e5;
+  const unit=days<=93?'day':days<=370?'week':'month'; // whitelisted, safe to inline
+  // Revenue = orders that were not cancelled / refunded / returned.
+  const LOST="('cancelled','canceled','refunded','returned','failed')";
+  const base="o.store_id=$1 AND o.is_deleted IS NOT TRUE AND o.created_at>=$2";
+  const [series,totals,status,top,recent]=await Promise.all([
+    pool.query(`WITH b AS (SELECT generate_series(date_trunc('${unit}',$2::timestamptz),date_trunc('${unit}',NOW()),INTERVAL '1 ${unit}') AS d)
+      SELECT to_char(b.d,'YYYY-MM-DD') AS date,COUNT(o.id)::int AS orders,
+        COALESCE(SUM(o.total) FILTER (WHERE LOWER(COALESCE(o.status,'')) NOT IN ${LOST}),0)::float AS revenue
+      FROM b LEFT JOIN orders o ON o.store_id=$1 AND o.is_deleted IS NOT TRUE AND date_trunc('${unit}',o.created_at)=b.d
+      GROUP BY b.d ORDER BY b.d`,[sid,start]),
+    pool.query(`SELECT COUNT(*)::int AS orders,
+        COALESCE(SUM(o.total) FILTER (WHERE LOWER(COALESCE(o.status,'')) NOT IN ${LOST}),0)::float AS revenue,
+        COUNT(*) FILTER (WHERE LOWER(COALESCE(o.status,'')) NOT IN ${LOST})::int AS kept_orders,
+        COUNT(DISTINCT NULLIF(o.customer_phone,''))::int AS customers
+      FROM orders o WHERE ${base}`,[sid,start]),
+    pool.query(`SELECT LOWER(COALESCE(NULLIF(o.status,''),'pending')) AS name,COUNT(*)::int AS value
+      FROM orders o WHERE ${base} GROUP BY 1 ORDER BY 2 DESC`,[sid,start]),
+    pool.query(`SELECT MAX(oi.product_name) AS name,SUM(COALESCE(oi.quantity,1))::int AS qty,
+        COALESCE(SUM(COALESCE(oi.total_price,oi.unit_price*COALESCE(oi.quantity,1))),0)::float AS revenue
+      FROM order_items oi JOIN orders o ON o.id=oi.order_id
+      WHERE ${base} AND LOWER(COALESCE(o.status,'')) NOT IN ${LOST}
+      GROUP BY COALESCE(oi.product_id::text,oi.product_name) ORDER BY qty DESC,revenue DESC LIMIT 6`,[sid,start]),
+    pool.query(`SELECT o.id,o.order_number,o.customer_name,o.total,o.status,o.created_at FROM orders o
+      WHERE ${base} ORDER BY o.created_at DESC LIMIT 10`,[sid,start]),
+  ]);
+  const t=totals.rows[0]||{};
+  let totalProducts=0,totalCustomers=0;
+  try{totalProducts=(await pool.query('SELECT COUNT(*)::int AS n FROM products WHERE store_id=$1',[sid])).rows[0].n;}catch{}
+  try{totalCustomers=(await pool.query('SELECT COUNT(*)::int AS n FROM customers WHERE store_id=$1',[sid])).rows[0].n;}catch{}
+  const allOrders=(await pool.query('SELECT COUNT(*)::int AS n FROM orders WHERE store_id=$1 AND is_deleted IS NOT TRUE',[sid])).rows[0].n;
+  const visits=parseInt(visitsRaw)||0;
+  const cfg=own.rows[0].config;
+  res.json({
+    range,unit,
+    totals:{
+      revenue:t.revenue||0,orders:t.orders||0,
+      avgOrder:t.kept_orders?Math.round((t.revenue||0)/t.kept_orders):0,
+      buyers:t.customers||0,customers:totalCustomers,products:totalProducts,
+      visits,conversion:visits>0?+((allOrders/visits)*100).toFixed(1):0,
+    },
+    series:series.rows,
+    status:status.rows,
+    topProducts:top.rows.map(r=>({...r,name:r.name||'—'})),
+    recentOrders:recent.rows.map(o=>({...o,order_number:formatOrderNumber(o.order_number,cfg)})),
+  });
+}catch(e){const msg=e.message||e.code||(e.errors&&e.errors.map(x=>x.code||x.message).join(','))||String(e);console.error('analytics:',msg);res.status(500).json({error:msg});}});
+
 // UPDATE STORE — saves DB columns + extra fields in config JSONB
 router.put('/stores/:sid',authMiddleware(['store_owner']),async(req,res)=>{try{
   const sid=req.params.sid;
@@ -1259,3 +1336,10 @@ router.get('/stores/:sid/activity-log/summary', authMiddleware(['store_owner']),
 module.exports=router;
 module.exports.sendStorePush=sendStorePush;
 module.exports.logActivity=logActivity;
+// Raw web-push sender (same VAPID keys) for the super-admin notifications.
+// Resolves to 'gone' when the browser subscription has expired.
+module.exports.sendRawPush=async(sub,payload)=>{
+  if(!webpush)return 'unavailable';
+  try{await webpush.sendNotification(sub,JSON.stringify(payload));return 'ok';}
+  catch(e){return (e.statusCode===410||e.statusCode===404)?'gone':'error';}
+};

@@ -364,12 +364,47 @@ ensureNotifTable();
 
 async function notifyAdmin({type,title,body,link,owner_id,dedup_key}){
   try{
-    await pool.query(`INSERT INTO admin_notifications(type,title,body,link,owner_id,dedup_key)
+    const ins=await pool.query(`INSERT INTO admin_notifications(type,title,body,link,owner_id,dedup_key)
       VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT (dedup_key) DO NOTHING`,
       [type,title,body||null,link||null,owner_id||null,dedup_key||null]);
+    // Only push for notifications that were actually inserted (dedup_key
+    // conflicts are repeats of something already announced).
+    if(!ins.rowCount)return;
+    sendPlatformPush({title,body:body||'',url:link||'/admin'}).catch(()=>{});
   }catch(e){console.error('[notifyAdmin]',e.message);}
 }
 global.__notifyAdmin=notifyAdmin;
+
+// ── Super-admin browser push ──
+// Same VAPID keys as the store dashboards (web-push lives in storeOwner.js).
+const ensurePlatformPushTable=()=>pool.query(`CREATE TABLE IF NOT EXISTS platform_push_subscriptions(
+  id SERIAL PRIMARY KEY, endpoint TEXT UNIQUE NOT NULL, keys_p256dh TEXT, keys_auth TEXT,
+  admin_id TEXT, created_at TIMESTAMPTZ DEFAULT NOW())`);
+async function sendPlatformPush(payload){
+  let send;try{send=require('./storeOwner').sendRawPush;}catch{return;}
+  if(!send)return;
+  try{
+    await ensurePlatformPushTable();
+    const subs=(await pool.query('SELECT * FROM platform_push_subscriptions')).rows;
+    for(const sub of subs){
+      const r=await send({endpoint:sub.endpoint,keys:{p256dh:sub.keys_p256dh,auth:sub.keys_auth}},payload);
+      if(r==='gone')await pool.query('DELETE FROM platform_push_subscriptions WHERE id=$1',[sub.id]);
+    }
+  }catch(e){console.log('[platform push]',e.message);}
+}
+router.post('/push/subscribe',authMiddleware(['platform_admin']),async(req,res)=>{try{
+  const sub=req.body?.subscription;
+  if(!sub?.endpoint)return res.status(400).json({error:'subscription required'});
+  await ensurePlatformPushTable();
+  await pool.query(`INSERT INTO platform_push_subscriptions(endpoint,keys_p256dh,keys_auth,admin_id) VALUES($1,$2,$3,$4)
+    ON CONFLICT (endpoint) DO UPDATE SET keys_p256dh=EXCLUDED.keys_p256dh,keys_auth=EXCLUDED.keys_auth,admin_id=EXCLUDED.admin_id`,
+    [sub.endpoint,sub.keys?.p256dh||'',sub.keys?.auth||'',String(req.user?.id||'')]);
+  res.json({ok:true});
+}catch(e){res.status(500).json({error:e.message});}});
+router.post('/push/test',authMiddleware(['platform_admin']),async(req,res)=>{
+  await sendPlatformPush({title:'MakretDZ',body:'Notifications are on ✅',url:'/admin'});
+  res.json({ok:true});
+});
 
 // Scan expiring/expired and upsert notifications
 async function scanSubscriptionEvents(){

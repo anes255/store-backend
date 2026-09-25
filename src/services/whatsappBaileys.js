@@ -1,6 +1,5 @@
 const {
   default: makeWASocket,
-  useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
@@ -11,12 +10,24 @@ const QRCode = require('qrcode');
 const pino = require('pino');
 const path = require('path');
 const fs = require('fs');
+const { useDbAuthState, hasDbCreds, listDbSessions, clearDbSession, importDirToDb } = require('./waDbAuth');
 
 const AUTH_DIR = path.join(__dirname, '../../wa-sessions');
 if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 
 const baileysLogger = pino({ level: process.env.LOG_LEVEL || 'silent' });
 const sessions = {};
+
+// Login credentials live in Postgres (see waDbAuth.js) so they survive Render
+// restarts; the legacy wa-sessions/<id>/ folder is only read for migration.
+async function hasCreds(storeId) {
+  try { if (await hasDbCreds(storeId)) return true; } catch (e) {}
+  return fs.existsSync(path.join(AUTH_DIR, storeId, 'creds.json'));
+}
+async function clearCreds(storeId) {
+  try { await clearDbSession(storeId); } catch (e) { console.log(`[WA-Baileys ${storeId}] clear creds:`, e.message); }
+  try { fs.rmSync(path.join(AUTH_DIR, storeId), { recursive: true, force: true }); } catch (e) {}
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -56,12 +67,11 @@ async function startSession(storeId) {
   }
 
   const sessionDir = path.join(AUTH_DIR, storeId);
-  const credsFile = path.join(sessionDir, 'creds.json');
-  const hasExistingCreds = fs.existsSync(credsFile);
+  const hasExistingCreds = await hasCreds(storeId);
 
   if (!hasExistingCreds) {
-    try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch (e) {}
-    fs.mkdirSync(sessionDir, { recursive: true });
+    // Fresh pairing: drop any half-written keys so the QR starts clean.
+    await clearCreds(storeId);
   }
 
   sessions[storeId] = {
@@ -92,7 +102,13 @@ async function createSocket(storeId, sessionDir) {
     version = [2, 3000, 1015901307];
   }
 
-  const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+  // Move a session paired before the DB store existed into the DB once.
+  try {
+    if (!(await hasDbCreds(storeId)) && await importDirToDb(storeId, sessionDir)) {
+      console.log(`[WA-Baileys ${storeId}] Imported file session into the database`);
+    }
+  } catch (e) { console.log(`[WA-Baileys ${storeId}] import failed:`, e.message); }
+  const { state, saveCreds } = await useDbAuthState(storeId);
   console.log(`[WA-Baileys ${storeId}] Creating socket...`);
 
   const sock = makeWASocket({
@@ -159,7 +175,7 @@ async function createSocket(storeId, sessionDir) {
 
       if (isLoggedOut) {
         console.log(`[WA-Baileys ${storeId}] 🔒 LOGGED OUT by user — session cleared`);
-        try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch (e) {}
+        await clearCreds(storeId);
         sessions[storeId] = {
           status: 'logged_out', qr: null, sock: null,
           phone: null, name: null, lastConnected: null,
@@ -185,8 +201,7 @@ async function createSocket(storeId, sessionDir) {
       sessions[storeId]._reconnectTimer = setTimeout(async () => {
         try {
           // Make sure creds still exist (user might have disconnected manually while we waited)
-          const credsFile = path.join(sessionDir, 'creds.json');
-          if (!fs.existsSync(credsFile)) {
+          if (!(await hasCreds(storeId))) {
             console.log(`[WA-Baileys ${storeId}] Creds deleted during backoff, stopping reconnect`);
             sessions[storeId].status = 'disconnected';
             sessions[storeId].error = null;
@@ -210,9 +225,7 @@ async function sendMessage(storeId, phone, message) {
   if (!session || session.status !== 'connected') {
     // Auto-trigger reconnection if session exists with creds but isn't connected
     if (session && session.status !== 'connecting' && session.status !== 'reconnecting' && session.status !== 'logged_out') {
-      const sessionDir = path.join(AUTH_DIR, storeId);
-      const credsFile = path.join(sessionDir, 'creds.json');
-      if (fs.existsSync(credsFile)) {
+      if (await hasCreds(storeId)) {
         console.log(`[WA-Baileys ${storeId}] sendMessage triggered auto-reconnect (status=${session.status})`);
         startSession(storeId).catch(() => {});
       }
@@ -251,23 +264,20 @@ async function disconnectSession(storeId) {
     try { await session.sock.logout(); } catch (e) {}
     try { session.sock.end(); } catch (e) {}
   }
-  const sessionDir = path.join(AUTH_DIR, storeId);
-  try { fs.rmSync(sessionDir, { recursive: true, force: true }); } catch (e) {}
+  await clearCreds(storeId);
   sessions[storeId] = { status: 'disconnected', qr: null, phone: null, name: null };
 }
 
 // ─── Restore all sessions on server start ───────────────────────────────────
 
 async function restoreSessions() {
-  if (!fs.existsSync(AUTH_DIR)) { fs.mkdirSync(AUTH_DIR, { recursive: true }); return; }
-  const dirs = fs.readdirSync(AUTH_DIR);
-  console.log(`[WA-Baileys] Found ${dirs.length} session(s) to restore`);
+  if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
+  const ids = await knownSessionIds();
+  console.log(`[WA-Baileys] Found ${ids.length} session(s) to restore`);
 
-  for (const storeId of dirs) {
+  for (const storeId of ids) {
     const sessionDir = path.join(AUTH_DIR, storeId);
-    if (!fs.statSync(sessionDir).isDirectory()) continue;
-    const credsFile = path.join(sessionDir, 'creds.json');
-    if (!fs.existsSync(credsFile)) {
+    if (!(await hasCreds(storeId))) {
       console.log(`[WA-Baileys] Skipping ${storeId} — no creds.json`);
       continue;
     }
@@ -303,28 +313,38 @@ async function restoreSessions() {
 // disconnected state (not logged_out), kick off a reconnect. This catches
 // edge cases where the reconnect loop gave up or a timer got lost.
 
+// Every session id with saved credentials (database first, then any legacy
+// folders that haven't been imported yet).
+async function knownSessionIds() {
+  const ids = new Set();
+  try { for (const id of await listDbSessions()) ids.add(id); } catch (e) { console.log('[WA-Baileys] list sessions:', e.message); }
+  try {
+    if (fs.existsSync(AUTH_DIR)) {
+      for (const d of fs.readdirSync(AUTH_DIR)) {
+        try { if (fs.statSync(path.join(AUTH_DIR, d)).isDirectory() && fs.existsSync(path.join(AUTH_DIR, d, 'creds.json'))) ids.add(d); } catch {}
+      }
+    }
+  } catch {}
+  return [...ids];
+}
+
 function startHealthCheck() {
-  setInterval(() => {
-    if (!fs.existsSync(AUTH_DIR)) return;
-    const dirs = fs.readdirSync(AUTH_DIR);
-    for (const storeId of dirs) {
+  setInterval(async () => {
+    let ids = [];
+    try { ids = await knownSessionIds(); } catch { return; }
+    for (const storeId of ids) {
       const sessionDir = path.join(AUTH_DIR, storeId);
-      try { if (!fs.statSync(sessionDir).isDirectory()) continue; } catch { continue; }
-      const credsFile = path.join(sessionDir, 'creds.json');
-      if (!fs.existsSync(credsFile)) continue;
-
       const s = sessions[storeId];
-      if (!s || s.status === 'logged_out') continue;
+      if (s && s.status === 'logged_out') continue;
       // Skip if healthy or actively waiting for QR
-      if (s.status === 'connected' || s.status === 'waiting_qr') continue;
+      if (s && (s.status === 'connected' || s.status === 'waiting_qr')) continue;
       // Skip if connecting/reconnecting but only recently started (within 3 min)
-      if ((s.status === 'connecting' || s.status === 'reconnecting') && s.startedAt && (Date.now() - s.startedAt < 180000)) continue;
+      if (s && (s.status === 'connecting' || s.status === 'reconnecting') && s.startedAt && (Date.now() - s.startedAt < 180000)) continue;
 
-      // Session has creds but is stale (error, disconnected, stuck reconnecting) — revive it
-      console.log(`[WA-Baileys healthcheck] Reviving stale session: ${storeId} (status=${s.status}, age=${s.startedAt ? Math.round((Date.now()-s.startedAt)/1000) : '?'}s)`);
-      // Clear any stuck reconnect timer
-      if (s._reconnectTimer) clearTimeout(s._reconnectTimer);
-      if (s.sock) { try { s.sock.ws.close(); } catch {} try { s.sock.end(); } catch {} }
+      // Credentials exist but the session is missing, stale or stuck — revive it
+      console.log(`[WA-Baileys healthcheck] Reviving session: ${storeId} (status=${s ? s.status : 'none'})`);
+      if (s && s._reconnectTimer) clearTimeout(s._reconnectTimer);
+      if (s && s.sock) { try { s.sock.ws.close(); } catch {} try { s.sock.end(); } catch {} }
       sessions[storeId] = {
         sock: null, status: 'connecting', qr: null,
         phone: s?.phone || null, name: s?.name || null,

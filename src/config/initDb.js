@@ -471,14 +471,17 @@ const initDb=async()=>{
     try{await pool.query("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS is_fragile BOOLEAN DEFAULT FALSE");}catch(e){}
     // Thumbnail shown next to an order notification in the dashboard bell.
     try{await pool.query("ALTER TABLE notifications ADD COLUMN IF NOT EXISTS image TEXT");}catch(e){}
+    // Storefront visit counter. POST /store/:slug/visit increments it, but the
+    // column was never created, so every visit was dropped and Analytics
+    // showed 0 visits / 0% conversion.
+    try{await pool.query("ALTER TABLE stores ADD COLUMN IF NOT EXISTS total_visits INT DEFAULT 0");}catch(e){}
     // One-off cleanup: hide the empty orders earlier carrier syncs created.
     // Soft delete (is_deleted) so they stay recoverable from the vault view.
     try{await pool.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE");}catch(e){}
     try{const r=await pool.query(`UPDATE orders o SET is_deleted=TRUE
       WHERE (o.is_deleted IS NOT TRUE)
-        AND (o.source LIKE 'carrier%' OR o.customer_name='(carrier import)')
-        AND NOT EXISTS (SELECT 1 FROM order_items oi WHERE oi.order_id=o.id)
-        AND (COALESCE(o.customer_phone,'')='' OR o.customer_name='(carrier import)')`);
+        AND (LEFT(o.source,8)='carrier_' OR o.customer_name='(carrier import)')
+        AND NOT EXISTS (SELECT 1 FROM order_items oi WHERE oi.order_id=o.id)`);
       if(r.rowCount)console.log('🧹 hid',r.rowCount,'blank carrier-import orders');}catch(e){console.log('blank order cleanup:',e.message);}
 
     // ═══ NEW: Product reviews table ═══
