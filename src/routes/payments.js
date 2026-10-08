@@ -144,6 +144,8 @@ router.post('/receipt/upload',async(req,res)=>{try{
   await pool.query("UPDATE orders SET payment_status='pending_verification',payment_method=$1,payment_reference=$2,status=CASE WHEN status='pending_payment' THEN 'new_order' ELSE status END,updated_at=NOW() WHERE id=$3",
     [payment_method||'ccp',reference_number||r.rows[0].id,order_id]);
 
+  // Every receipt needs the owner's review, so always notify about it.
+  try{const{notifyStore}=require('../services/notify');notifyStore(store.id,{type:'payment',title:`Payment receipt for order #${prevOrder?.order_number||''}`,message:`${prevOrder?.customer_name||''} | ${(payment_method||'ccp').toUpperCase()}${reference_number?' '+reference_number:''}`,link:'/dashboard/orders'});}catch(e){}
   if(prevOrder&&prevOrder.status==='pending_payment'){
     try{await pool.query("INSERT INTO notifications(store_id,type,title,message,link) VALUES($1,'order',$2,$3,$4)",[store.id,`New order #${prevOrder.order_number}`,`${prevOrder.customer_name} placed an order for ${prevOrder.total} ${store.currency||'DZD'}`,'/dashboard/orders']);}catch{}
     try{const{sendStorePush}=require('./storeOwner');sendStorePush(store.id,`New order #${prevOrder.order_number}`,`${prevOrder.customer_name} — ${prevOrder.total} ${store.currency||'DZD'}`);}catch{}

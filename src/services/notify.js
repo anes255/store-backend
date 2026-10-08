@@ -15,9 +15,10 @@ function ensureCols() {
   return colsReady;
 }
 
-// Settings toggle that governs each notification type. notify_customers is
-// opt-in in the settings UI; the others are on unless switched off.
-const TOGGLE = { order: 'notify_orders', status: 'notify_orders', payment: 'notify_orders', stock: 'notify_stock', customer: 'notify_customers' };
+// Settings toggle that governs each notification type. Every type is on
+// unless the owner switches it off (customer alerts used to be opt-in, so
+// most stores never saw anything but new orders).
+const TOGGLE = { order: 'notify_orders', status: 'notify_orders', payment: 'notify_orders', stock: 'notify_stock', customer: 'notify_customers', review: 'notify_customers' };
 
 async function storeConfig(storeId) {
   try {
@@ -32,7 +33,7 @@ async function notifyStore(storeId, { type = 'info', title, message = '', link =
   try {
     const cfg = await storeConfig(storeId);
     const key = TOGGLE[type];
-    const enabled = !key ? true : key === 'notify_customers' ? cfg[key] === true : cfg[key] !== false;
+    const enabled = !key ? true : cfg[key] !== false;
     if (!enabled) return;
     await ensureCols();
     await pool.query(
@@ -57,4 +58,26 @@ const STATUS_LABEL = {
 };
 const statusLabel = (s) => STATUS_LABEL[s] || String(s || '').replace(/_/g, ' ');
 
-module.exports = { notifyStore, statusLabel };
+// Stock alert when a product's quantity crosses the low-stock threshold or
+// runs out. `prev` is the quantity before the change (null = unknown, e.g. a
+// brand-new product). Only the crossing notifies, so repeated edits at the
+// same level don't spam the owner.
+async function checkStockAlert(storeId, productId, prev) {
+  try {
+    const p = (await pool.query('SELECT name,stock_quantity,images,track_inventory FROM products WHERE id=$1', [productId])).rows[0];
+    if (!p || p.track_inventory === false) return;
+    const left = parseInt(p.stock_quantity);
+    if (!Number.isFinite(left)) return;
+    const cfg = await storeConfig(storeId);
+    const lowAt = parseInt(cfg.low_stock_threshold) || 5;
+    const before = prev == null || prev === '' ? null : parseInt(prev);
+    let title = null;
+    if (left <= 0 && (before == null || before > 0)) title = `Out of stock: ${p.name}`;
+    else if (left > 0 && left <= lowAt && (before == null || before > lowAt)) title = `Low stock: ${p.name}`;
+    if (!title) return;
+    let im = p.images; if (typeof im === 'string') { try { im = JSON.parse(im); } catch { im = []; } }
+    await notifyStore(storeId, { type: 'stock', title, message: `${left} left`, link: '/dashboard/stock', image: Array.isArray(im) && typeof im[0] === 'string' ? im[0] : null });
+  } catch (e) { console.log('[notify stock]', e.message); }
+}
+
+module.exports = { notifyStore, statusLabel, checkStockAlert };

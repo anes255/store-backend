@@ -277,6 +277,8 @@ if (custId) {
     } else {
       const nc = await pool.query('INSERT INTO customers(store_id,full_name,email,phone,address,city,wilaya,total_orders,total_spent) VALUES($1,$2,$3,$4,$5,$6,$7,1,$8) RETURNING id',[sid,customer_name,customer_email||null,customer_phone,shipping_address||null,shipping_city||null,shipping_wilaya||null,total]);
       custId = nc.rows[0]?.id;
+      // First order from this phone creates the customer: tell the owner.
+      try{const{notifyStore}=require('../services/notify');notifyStore(sid,{type:'customer',title:`New customer: ${customer_name||customer_phone}`,message:customer_phone||'',link:'/dashboard/customers'});}catch(e){}
     }
     // Link the order to the customer so it shows in their profile
     if (custId) await pool.query('UPDATE orders SET customer_id=$1 WHERE id=$2',[custId,o.rows[0].id]);
@@ -316,16 +318,11 @@ for(const it of oi){try{
   }else{
     await pool.query('UPDATE products SET stock_quantity=GREATEST(0,COALESCE(stock_quantity,0)-$1) WHERE id=$2',[it.quantity,it.product_id]);
   }
-  // Tell the owner once, at the moment stock crosses the low-stock threshold.
+  // Tell the owner once, when stock crosses the low-stock threshold or runs out.
   try{
-    const lowAt=parseInt(storeCfg.low_stock_threshold)||5;
-    const now=(await pool.query('SELECT name,stock_quantity,images FROM products WHERE id=$1',[it.product_id])).rows[0];
+    const now=(await pool.query('SELECT stock_quantity FROM products WHERE id=$1',[it.product_id])).rows[0];
     const left=parseInt(now?.stock_quantity);
-    if(now&&Number.isFinite(left)&&left<=lowAt&&left+(parseInt(it.quantity)||1)>lowAt){
-      let im=now.images;if(typeof im==='string'){try{im=JSON.parse(im);}catch{im=[];}}
-      const{notifyStore}=require('../services/notify');
-      notifyStore(sid,{type:'stock',title:`Low stock: ${now.name}`,message:`${left} left`,image:Array.isArray(im)&&typeof im[0]==='string'?im[0]:null,link:'/dashboard/stock'});
-    }
+    if(Number.isFinite(left)){const{checkStockAlert}=require('../services/notify');checkStockAlert(sid,it.product_id,left+(parseInt(it.quantity)||1));}
   }catch(e){}
 }catch(e){}}
 try{await pool.query('UPDATE order_items SET is_fragile=TRUE WHERE order_id=$1 AND product_id IN (SELECT id FROM products WHERE is_fragile=TRUE)',[o.rows[0].id]);}catch(e){}
@@ -397,7 +394,7 @@ router.get('/:slug/products/:pslug/reviews',async(req,res)=>{try{
 router.post('/:slug/products/:pslug/reviews',async(req,res)=>{try{
   const store=(await pool.query('SELECT id,config FROM stores WHERE slug=$1',[req.params.slug])).rows[0];
   if(!store)return res.status(404).json({error:'Store not found'});
-  const product=(await pool.query('SELECT id FROM products WHERE store_id=$1 AND slug=$2',[store.id,req.params.pslug])).rows[0];
+  const product=(await pool.query('SELECT id,name FROM products WHERE store_id=$1 AND slug=$2',[store.id,req.params.pslug])).rows[0];
   if(!product)return res.status(404).json({error:'Product not found'});
   const{customer_name,customer_phone,rating,title,content}=req.body;
   if(!customer_name||!rating)return res.status(400).json({error:'Name and rating required'});
@@ -426,6 +423,7 @@ router.post('/:slug/products/:pslug/reviews',async(req,res)=>{try{
     'INSERT INTO reviews(store_id,product_id,customer_name,customer_phone,rating,title,content,is_approved,ai_moderation_score,ai_moderation_reason) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *',
     [store.id,product.id,customer_name,customer_phone||null,rating,title||null,content||null,autoApprove,aiScore,aiReason]
   );
+  try{const{notifyStore}=require('../services/notify');notifyStore(store.id,{type:'review',title:`New ${rating}★ review: ${product.name||''}`.trim(),message:`${customer_name||''}${autoApprove?'':' (awaiting approval)'}`,link:'/dashboard/smart-reviews'});}catch(e){}
   res.status(201).json({...r.rows[0],auto_approved:autoApprove});
 }catch(e){res.status(500).json({error:e.message});}});
 

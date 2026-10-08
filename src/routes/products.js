@@ -97,8 +97,10 @@ if(f.offer_minutes!==undefined){u.push(`offer_minutes=$${i}`);v.push(parseInt(f.
 if(f.quantity_offers!==undefined){await ensureQuantityOffersCol();const qOffers=normalizeQuantityOffers(f.quantity_offers);u.push(`quantity_offers=$${i}::jsonb`);v.push(JSON.stringify(qOffers));i++;}
 if(!u.length)return res.status(400).json({error:'Nothing to update'});
 v.push(req.params.pid,req.params.sid);
+let prevStock=null;if(f.stock_quantity!==undefined){try{prevStock=(await pool.query('SELECT stock_quantity FROM products WHERE id=$1',[req.params.pid])).rows[0]?.stock_quantity;}catch(e){}}
 const r=await pool.query(`UPDATE products SET ${u.join(',')},updated_at=NOW() WHERE id=$${i} AND store_id=$${i+1} RETURNING *`,v);
 if(!r.rows.length)return res.status(404).json({error:'Not found'});
+if(f.stock_quantity!==undefined){try{require('../services/notify').checkStockAlert(req.params.sid,req.params.pid,prevStock);}catch(e){}}
 const p=r.rows[0];let imgs=p.images;if(typeof imgs==='string')try{imgs=JSON.parse(imgs);}catch(e){imgs=[];}if(!Array.isArray(imgs))imgs=[];
 res.json({...p,name_en:p.name,images:imgs,thumbnail:imgs[0]||null,compare_at_price:p.compare_price});
 }catch(e){console.error('UPDATE product error:',e.message);res.status(500).json({error:e.message});}});

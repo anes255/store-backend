@@ -18,6 +18,26 @@ if (!fs.existsSync(AUTH_DIR)) fs.mkdirSync(AUTH_DIR, { recursive: true });
 const baileysLogger = pino({ level: process.env.LOG_LEVEL || 'silent' });
 const sessions = {};
 
+// Set when the process is shutting down (Render sends SIGTERM to the old
+// instance during a deploy/restart). From then on nothing reconnects, so the
+// old and new instance don't fight over the same WhatsApp login.
+let shuttingDown = false;
+let socketGen = 0;
+
+// Close whatever socket a session currently has WITHOUT logging out (logout
+// would unlink the device and force a new QR scan).
+function endSocket(s) {
+  if (!s) return;
+  if (s._reconnectTimer) { clearTimeout(s._reconnectTimer); s._reconnectTimer = null; }
+  const sock = s.sock;
+  s.sock = null;
+  if (sock) {
+    try { sock.ev.removeAllListeners('connection.update'); } catch (e) {}
+    try { sock.ev.removeAllListeners('creds.update'); } catch (e) {}
+    try { sock.end(undefined); } catch (e) {}
+  }
+}
+
 // Login credentials live in Postgres (see waDbAuth.js) so they survive Render
 // restarts; the legacy wa-sessions/<id>/ folder is only read for migration.
 async function hasCreds(storeId) {
@@ -92,6 +112,18 @@ async function startSession(storeId) {
 }
 
 async function createSocket(storeId, sessionDir) {
+  if (shuttingDown) return;
+  // Every call gets a generation number. Two overlapping createSocket calls
+  // (reconnect timer + watchdog + sendMessage auto-reconnect) used to open
+  // two connections with the same login; WhatsApp then kicks one ("replaced",
+  // 440), both reconnect, and repeated conflicts end in a forced logout that
+  // wiped the saved session. Only the newest generation is allowed to live.
+  if (!sessions[storeId]) sessions[storeId] = { status: 'connecting', retries: 0 };
+  const gen = ++socketGen; // global, so it never repeats even if the session object is replaced
+  sessions[storeId]._gen = gen;
+  sessions[storeId].startedAt = Date.now();
+  endSocket(sessions[storeId]);
+  const stale = () => shuttingDown || !sessions[storeId] || sessions[storeId]._gen !== gen;
   let version;
   try {
     const vInfo = await fetchLatestBaileysVersion();
@@ -109,7 +141,8 @@ async function createSocket(storeId, sessionDir) {
     }
   } catch (e) { console.log(`[WA-Baileys ${storeId}] import failed:`, e.message); }
   const { state, saveCreds } = await useDbAuthState(storeId);
-  console.log(`[WA-Baileys ${storeId}] Creating socket...`);
+  if (stale()) { console.log(`[WA-Baileys ${storeId}] newer connect attempt started, dropping this one`); return; }
+  console.log(`[WA-Baileys ${storeId}] Creating socket (gen ${gen})...`);
 
   const sock = makeWASocket({
     version,
@@ -134,6 +167,7 @@ async function createSocket(storeId, sessionDir) {
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', async (update) => {
+    if (stale()) { try { sock.end(undefined); } catch (e) {} return; }
     const { connection, lastDisconnect, qr } = update;
     const code = lastDisconnect?.error?.output?.statusCode;
     const errorMsg = lastDisconnect?.error?.message || '';
@@ -188,7 +222,12 @@ async function createSocket(storeId, sessionDir) {
       // Cap backoff at 5 minutes so it doesn't wait too long.
       const retries = (sessions[storeId].retries || 0) + 1;
       sessions[storeId].retries = retries;
-      const backoff = Math.min(3000 * Math.pow(1.5, Math.min(retries - 1, 10)), 300000);
+      let backoff = Math.min(3000 * Math.pow(1.5, Math.min(retries - 1, 10)), 300000);
+      // 440 = another connection with this login took over (typically the
+      // new Render instance during a deploy). Reconnecting at once just kicks
+      // it back and the two loop; wait it out instead.
+      if (code === DisconnectReason.connectionReplaced) backoff = Math.max(backoff, 60000);
+      sessions[storeId].sock = null;
 
       console.log(`[WA-Baileys ${storeId}] 🔄 RECONNECTING attempt ${retries} in ${(backoff / 1000).toFixed(0)}s (code=${code} err="${errorMsg}")`);
       sessions[storeId].status = 'reconnecting';
@@ -199,6 +238,7 @@ async function createSocket(storeId, sessionDir) {
       if (sessions[storeId]._reconnectTimer) clearTimeout(sessions[storeId]._reconnectTimer);
 
       sessions[storeId]._reconnectTimer = setTimeout(async () => {
+        if (stale()) return;
         try {
           // Make sure creds still exist (user might have disconnected manually while we waited)
           if (!(await hasCreds(storeId))) {
@@ -362,7 +402,21 @@ function startHealthCheck() {
 // Start the watchdog
 startHealthCheck();
 
+// Render stops the old instance with SIGTERM when it deploys or restarts.
+// Close every WhatsApp connection cleanly (credentials stay in the DB) so the
+// new instance can take over the login without a conflict.
+function shutdown(sig) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[WA-Baileys] ${sig}: closing ${Object.keys(sessions).length} session(s) without logout`);
+  for (const id of Object.keys(sessions)) endSocket(sessions[id]);
+  setTimeout(() => process.exit(0), 1500).unref();
+}
+process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.once('SIGINT', () => shutdown('SIGINT'));
+
 module.exports = {
+  hasCreds,
   startSession,
   sendMessage,
   disconnectSession,

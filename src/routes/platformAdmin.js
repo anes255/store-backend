@@ -895,7 +895,16 @@ router.post('/whatsapp/start',authMiddleware(['platform_admin']),async(req,res)=
   }catch(e){res.status(500).json({error:e.message});}
 });
 router.get('/whatsapp/status',authMiddleware(['platform_admin']),async(req,res)=>{
-  try{const wa=getWA();if(!wa)return res.json({status:'not_available',connected:false});res.set('Cache-Control','no-store, no-cache, must-revalidate, proxy-revalidate');res.set('Pragma','no-cache');res.set('Expires','0');res.json(wa.getStatus(PLATFORM_WA_ID));}catch(e){res.json({status:'error',connected:false,error:e.message});}
+  try{const wa=getWA();if(!wa)return res.json({status:'not_available',connected:false});res.set('Cache-Control','no-store, no-cache, must-revalidate, proxy-revalidate');res.set('Pragma','no-cache');res.set('Expires','0');
+    let st=wa.getStatus(PLATFORM_WA_ID);
+    // A saved login exists but this server instance hasn't opened it yet (it
+    // just restarted, or an earlier attempt errored): open it now instead of
+    // showing "Not connected" and inviting a fresh QR scan.
+    if(!st.connected&&!st.qr&&['not_started','error','disconnected'].includes(st.status)&&wa.hasCreds&&await wa.hasCreds(PLATFORM_WA_ID)){
+      wa.startSession(PLATFORM_WA_ID).catch(e=>console.error('[WA resume]',e.message));
+      st={...wa.getStatus(PLATFORM_WA_ID),has_saved_login:true};
+    }
+    res.json(st);}catch(e){res.json({status:'error',connected:false,error:e.message});}
 });
 router.post('/whatsapp/disconnect',authMiddleware(['platform_admin']),async(req,res)=>{
   try{const wa=getWA();if(!wa)return res.status(503).json({error:'WhatsApp service not available'});await wa.disconnectSession(PLATFORM_WA_ID);res.json({ok:true});}catch(e){res.status(500).json({error:e.message});}
