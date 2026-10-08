@@ -520,20 +520,40 @@ router.get('/stores/:sid',authMiddleware(['store_owner']),async(req,res)=>{try{
   res.json(await loadStore(sid));
 }catch(e){res.status(500).json({error:e.message});}});
 
-router.get('/stores/:sid/dashboard',authMiddleware(['store_owner']),async(req,res)=>{try{const sid=req.params.sid;const store=await pool.query('SELECT * FROM stores WHERE id=$1 AND owner_id=$2',[sid,req.user.id]);if(!store.rows.length)return res.status(404).json({error:'Not found'});const full=await loadStore(sid);let to=0,tr=0,tp=0,tc=0,ro=[],sd=[];try{to=parseInt((await pool.query('SELECT COUNT(*) FROM orders WHERE store_id=$1',[sid])).rows[0].count);}catch(e){}try{tr=parseFloat((await pool.query("SELECT COALESCE(SUM(total),0) as t FROM orders WHERE store_id=$1 AND (payment_status='paid' OR status IN ('confirmed','preparing','shipped','delivered'))",[sid])).rows[0].t);}catch(e){}try{tp=parseInt((await pool.query('SELECT COUNT(*) FROM products WHERE store_id=$1',[sid])).rows[0].count);}catch(e){}try{tc=parseInt((await pool.query('SELECT COUNT(*) FROM customers WHERE store_id=$1',[sid])).rows[0].count);}catch(e){}try{ro=(await pool.query('SELECT * FROM orders WHERE store_id=$1 ORDER BY created_at DESC LIMIT 10',[sid])).rows;}catch(e){}try{sd=(await pool.query("SELECT DATE(created_at) as date,COUNT(*) as orders,COALESCE(SUM(total),0) as revenue FROM orders WHERE store_id=$1 AND created_at>NOW()-INTERVAL '30 days' GROUP BY DATE(created_at) ORDER BY date",[sid])).rows;}catch(e){}
+router.get('/stores/:sid/dashboard',authMiddleware(['store_owner']),async(req,res)=>{try{const sid=req.params.sid;const store=await pool.query('SELECT * FROM stores WHERE id=$1 AND owner_id=$2',[sid,req.user.id]);if(!store.rows.length)return res.status(404).json({error:'Not found'});const full=await loadStore(sid);
+// Every figure uses the same definition of an order: not deleted, and not an
+// online-payment order still waiting for its receipt (those are hidden from
+// the Orders page too). Revenue counts every such order except cancelled /
+// returned / refunded ones. The old counters disagreed with each other —
+// total orders included deleted ones, revenue skipped new orders, the status
+// box only looked at the 10 latest orders and avg order value was never sent.
+const BASE="store_id=$1 AND is_deleted IS NOT TRUE AND COALESCE(status,'')<>'pending_payment'";
+const LOST="LOWER(COALESCE(status,'')) IN ('cancelled','canceled','returned','refunded','failed','delivery_failed')";
+let to=0,tr=0,kept=0,tp=0,tc=0,ro=[],sd=[],statusCounts={},visits=0;
+try{const r=(await pool.query(`SELECT COUNT(*)::int AS n, COALESCE(SUM(total) FILTER (WHERE NOT (${LOST})),0)::float AS rev, COUNT(*) FILTER (WHERE NOT (${LOST}))::int AS kept FROM orders WHERE ${BASE}`,[sid])).rows[0];to=r.n;tr=r.rev;kept=r.kept;}catch(e){console.error('[dashboard totals]',e.message);}
+try{for(const r of (await pool.query(`SELECT LOWER(COALESCE(NULLIF(status,''),'new_order')) AS s,COUNT(*)::int AS n FROM orders WHERE ${BASE} GROUP BY 1`,[sid])).rows)statusCounts[r.s]=r.n;}catch(e){}
+try{tp=parseInt((await pool.query('SELECT COUNT(*) FROM products WHERE store_id=$1',[sid])).rows[0].count);}catch(e){}
+try{tc=parseInt((await pool.query('SELECT COUNT(*) FROM customers WHERE store_id=$1',[sid])).rows[0].count);}catch(e){}
+try{visits=parseInt((await pool.query('SELECT total_visits FROM stores WHERE id=$1',[sid])).rows[0]?.total_visits)||0;}catch(e){}
+try{ro=(await pool.query(`SELECT * FROM orders WHERE ${BASE} ORDER BY created_at DESC LIMIT 10`,[sid])).rows;}catch(e){}
+// Last 7 days, one row per day (zero-filled) — the chart is labelled "last 7 days".
+try{sd=(await pool.query(`WITH d AS (SELECT generate_series(date_trunc('day',NOW())-INTERVAL '6 days',date_trunc('day',NOW()),INTERVAL '1 day') AS day)
+  SELECT to_char(d.day,'YYYY-MM-DD') AS date,COUNT(o.id)::int AS orders,COALESCE(SUM(o.total) FILTER (WHERE NOT (${LOST.replace(/status/g,'o.status')})),0)::float AS revenue
+  FROM d LEFT JOIN orders o ON o.store_id=$1 AND o.is_deleted IS NOT TRUE AND COALESCE(o.status,'')<>'pending_payment' AND date_trunc('day',o.created_at)=d.day
+  GROUP BY d.day ORDER BY d.day`,[sid])).rows;}catch(e){console.error('[dashboard series]',e.message);}
 // Real period-over-period deltas. The dashboard used to print hard-coded
 // "+8.2%" style figures next to every card, which read as growth even for a
 // store with zero of everything. Compare the last 30 days against the 30
 // before that and let the client decide what to show.
 let trend={};
 try{
-  const paidFilter="(payment_status='paid' OR status IN ('confirmed','preparing','shipped','delivered'))";
+  const paidFilter=`NOT (${LOST})`;
   const q=await pool.query(`SELECT
       COUNT(*) FILTER (WHERE created_at >= NOW()-INTERVAL '30 days') AS orders_cur,
       COUNT(*) FILTER (WHERE created_at >= NOW()-INTERVAL '60 days' AND created_at < NOW()-INTERVAL '30 days') AS orders_prev,
       COALESCE(SUM(total) FILTER (WHERE created_at >= NOW()-INTERVAL '30 days' AND ${paidFilter}),0) AS revenue_cur,
       COALESCE(SUM(total) FILTER (WHERE created_at >= NOW()-INTERVAL '60 days' AND created_at < NOW()-INTERVAL '30 days' AND ${paidFilter}),0) AS revenue_prev
-    FROM orders WHERE store_id=$1`,[sid]);
+    FROM orders WHERE ${BASE}`,[sid]);
   const d=q.rows[0]||{};
   const oc=parseInt(d.orders_cur)||0, op=parseInt(d.orders_prev)||0;
   const rc=parseFloat(d.revenue_cur)||0, rp=parseFloat(d.revenue_prev)||0;
@@ -544,7 +564,7 @@ try{
   };
 }catch(e){}
 let itemsByOrder={};try{const ids=ro.map(o=>o.id);if(ids.length){const ir=await pool.query("SELECT oi.order_id,oi.product_id,oi.product_name,oi.product_image,oi.quantity,oi.unit_price,oi.total_price,p.images AS p_images FROM order_items oi LEFT JOIN products p ON p.id=oi.product_id WHERE oi.order_id=ANY($1::uuid[])",[ids]);for(const it of ir.rows){let img=it.product_image||null;if(!img){try{const imgs=Array.isArray(it.p_images)?it.p_images:(typeof it.p_images==='string'?JSON.parse(it.p_images||'[]'):[]);img=imgs[0]||null;}catch(e){}}(itemsByOrder[it.order_id]=itemsByOrder[it.order_id]||[]).push({product_id:it.product_id,product_name:it.product_name,quantity:it.quantity,price:it.unit_price,total_price:it.total_price,image:img});}}}catch(e){console.error('[dashboard items]',e.message);}
-res.json({store:full,stats:{totalOrders:to,totalRevenue:tr,totalProducts:tp,totalCustomers:tc,storeVisits:full.total_visits||0},trend,recentOrders:ro.map(o=>{let _c=full.config||{};if(typeof _c==='string'){try{_c=JSON.parse(_c);}catch{_c={};}}return{...o,order_number:formatOrderNumber(o.order_number,_c),items:itemsByOrder[o.id]||[],first_image:(itemsByOrder[o.id]||[]).find(i=>i.image)?.image||null};}),salesData:sd});}catch(e){res.status(500).json({error:e.message});}});
+res.json({store:full,stats:{totalOrders:to,totalRevenue:tr,avgOrderValue:kept?Math.round(tr/kept):0,totalProducts:tp,totalCustomers:tc,storeVisits:visits},statusCounts,trend,recentOrders:ro.map(o=>{let _c=full.config||{};if(typeof _c==='string'){try{_c=JSON.parse(_c);}catch{_c={};}}return{...o,order_number:formatOrderNumber(o.order_number,_c),items:itemsByOrder[o.id]||[],first_image:(itemsByOrder[o.id]||[]).find(i=>i.image)?.image||null};}),salesData:sd});}catch(e){res.status(500).json({error:e.message});}});
 
 // ANALYTICS — everything the Analytics page charts, computed over ALL of the
 // store's orders in the chosen range. The page used to derive its pie chart

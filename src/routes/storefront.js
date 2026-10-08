@@ -76,7 +76,7 @@ router.get('/:slug',async(req,res)=>{try{const s=(await pool.query('SELECT * FRO
     enable_cod:pay.cod_enabled||true,enable_ccp:pay.ccp_enabled||false,ccp_account:pay.ccp_account,ccp_name:pay.ccp_name,enable_baridimob:pay.baridimob_enabled||false,baridimob_rip:pay.baridimob_rip,baridimob_qr:cfg.baridimob_qr||null,enable_bank_transfer:pay.bank_transfer_enabled||false,bank_name:pay.bank_name,bank_account:pay.bank_account,bank_rib:pay.bank_rib,
     enable_chargily:chargilyOk&&(cfg.chargily_enabled!==false),
     // Shipping
-    shipping_default_price:400,
+    shipping_default_price:400,default_shipping_type:(cfg.default_shipping_type==='home'?'home':'desk'),free_shipping_enabled:!!s.free_shipping_enabled,free_shipping_threshold:Number(s.free_shipping_threshold||0),
     // AI & Chat
     ai_chatbot_enabled:cfg.ai_chatbot_enabled||cfg.ai_agent_enabled||false,ai_chatbot_name:cfg.ai_chatbot_name||'Support Bot',ai_chatbot_greeting:cfg.ai_chatbot_greeting||'مرحباً! كيف يمكنني مساعدتك؟',
     // WhatsApp floating button (admin-configurable in Store Details)
@@ -213,7 +213,7 @@ router.put('/:slug/customers/profile',authMiddleware([]),async(req,res)=>{try{co
   const c=(await pool.query('SELECT * FROM customers WHERE id=$1',[req.user.id])).rows[0];res.json({...c,name:c.full_name});}catch(e){res.status(500).json({error:e.message});}});
 
 // Checkout
-router.post('/:slug/orders',async(req,res)=>{try{const store=(await pool.query('SELECT * FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.status(404).json({error:'Not found'});const sid=store.id;const{items,customer_name,customer_phone,customer_email,shipping_address,shipping_city,shipping_wilaya,shipping_zip,shipping_type,payment_method,notes,customer_id,notification_preference,delivery_company_id}=req.body;if(!items||!items.length)return res.status(400).json({error:'Cart empty'});if(!customer_name||!customer_phone||!shipping_address)return res.status(400).json({error:'Info required'});let subtotal=0;const oi=[];let storeCfg=store.config||{};if(typeof storeCfg==='string'){try{storeCfg=JSON.parse(storeCfg);}catch{storeCfg={};}}const allowStoreOversell=storeCfg.allow_oversell===true;for(const it of items){const p=(await pool.query('SELECT * FROM products WHERE id=$1 AND store_id=$2',[it.product_id,sid])).rows[0];if(!p)return res.status(400).json({error:`Product not found: ${it.product_id}`});
+router.post('/:slug/orders',async(req,res)=>{try{let offerFreeShip=false;const store=(await pool.query('SELECT * FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.status(404).json({error:'Not found'});const sid=store.id;const{items,customer_name,customer_phone,customer_email,shipping_address,shipping_city,shipping_wilaya,shipping_zip,shipping_type,payment_method,notes,customer_id,notification_preference,delivery_company_id}=req.body;if(!items||!items.length)return res.status(400).json({error:'Cart empty'});if(!customer_name||!customer_phone||!shipping_address)return res.status(400).json({error:'Info required'});let subtotal=0;const oi=[];let storeCfg=store.config||{};if(typeof storeCfg==='string'){try{storeCfg=JSON.parse(storeCfg);}catch{storeCfg={};}}const allowStoreOversell=storeCfg.allow_oversell===true;for(const it of items){const p=(await pool.query('SELECT * FROM products WHERE id=$1 AND store_id=$2',[it.product_id,sid])).rows[0];if(!p)return res.status(400).json({error:`Product not found: ${it.product_id}`});
   // Check stock — block the whole order if any item is out of stock and oversell is disabled
   if(p.stock_quantity!==null&&p.stock_quantity<(it.quantity||1)&&!p.allow_oversell&&!allowStoreOversell&&p.track_inventory!==false){
     return res.status(400).json({error:`Out of stock: ${p.name}`,product_id:p.id,out_of_stock:true});
@@ -223,7 +223,7 @@ router.post('/:slug/orders',async(req,res)=>{try{const store=(await pool.query('
   if(p.is_on_sale&&p.offer_discount){const _opct=parseFloat(String(p.offer_discount).replace(/[^0-9.]/g,''))||0;if(_opct>0)unitPrice=Math.round(unitPrice*(1-_opct/100));}
   if(it.variant){let vd=it.variant;if(typeof vd==='string'){try{vd=JSON.parse(vd);}catch{vd={};}}if(vd.price!=null&&parseFloat(vd.price)>0)unitPrice=parseFloat(vd.price);else if(vd.price_diff!=null)unitPrice+=parseFloat(vd.price_diff);else if(vd.additional_price!=null)unitPrice+=parseFloat(vd.additional_price);if(Array.isArray(vd.selections)){for(const sel of vd.selections){if(sel.price_diff!=null)unitPrice+=parseFloat(sel.price_diff);}}}
   // Apply quantity offer discount (e.g. "Buy 3 get 20% OFF")
-  {let qOffers=p.quantity_offers;if(typeof qOffers==='string'){try{qOffers=JSON.parse(qOffers);}catch{qOffers=[];}}if(Array.isArray(qOffers)){const qMatch=qOffers.filter(qo=>parseInt(qo.quantity)>0&&it.quantity>=parseInt(qo.quantity)).sort((a,b)=>parseInt(b.quantity)-parseInt(a.quantity))[0];if(qMatch){const _dv=parseFloat(qMatch.discount_value)||0;if(_dv>0){if(qMatch.discount_type==='fixed')unitPrice=Math.max(0,unitPrice-_dv);else unitPrice=Math.round(unitPrice*(1-_dv/100));}else if(qMatch.label){const _qm=String(qMatch.label).match(/(\d+(?:\.\d+)?)\s*%/);if(_qm){const _qpct=parseFloat(_qm[1]);if(_qpct>0)unitPrice=Math.round(unitPrice*(1-_qpct/100));}}}}}
+  {let qOffers=p.quantity_offers;if(typeof qOffers==='string'){try{qOffers=JSON.parse(qOffers);}catch{qOffers=[];}}if(Array.isArray(qOffers)){const qMatch=qOffers.filter(qo=>parseInt(qo.quantity)>0&&it.quantity>=parseInt(qo.quantity)).sort((a,b)=>parseInt(b.quantity)-parseInt(a.quantity))[0];if(qMatch){if(qMatch.free_shipping)offerFreeShip=true;const _dv=parseFloat(qMatch.discount_value)||0;if(_dv>0){if(qMatch.discount_type==='fixed')unitPrice=Math.max(0,unitPrice-_dv);else unitPrice=Math.round(unitPrice*(1-_dv/100));}else if(qMatch.label){const _qm=String(qMatch.label).match(/(\d+(?:\.\d+)?)\s*%/);if(_qm){const _qpct=parseFloat(_qm[1]);if(_qpct>0)unitPrice=Math.round(unitPrice*(1-_qpct/100));}}}}}
   const t=unitPrice*it.quantity;subtotal+=t;let imgs=p.images;if(typeof imgs==='string')try{imgs=JSON.parse(imgs);}catch(e){imgs=[];}if(!Array.isArray(imgs))imgs=[];oi.push({product_id:p.id,product_name:p.name,product_image:imgs[0]||null,variant_info:it.variant||null,quantity:it.quantity,unit_price:unitPrice,total_price:t,weight:(parseFloat(p.weight)||0)*(it.quantity||1)});}
   // Determine shipping cost from wilaya rates (desk vs home delivery).
   // If a delivery company is selected and that wilaya has a per-company price,
@@ -260,6 +260,11 @@ router.post('/:slug/orders',async(req,res)=>{try{const store=(await pool.query('
       discount=cpMatching.reduce((s,p)=>{const pct=parseFloat(p.coupon_discount_percent)||0;return s+Math.round((parseFloat(p.price)||0)*(pct/100));},0);
     }
   }
+  // Free shipping: the store-wide "free above X" setting (measured on the
+  // products total, after offers) or a quantity offer that includes it.
+  // Neither was applied before, so buyers were still charged shipping.
+  const freeAbove=Number(store.free_shipping_threshold||0);
+  if(offerFreeShip||(store.free_shipping_enabled&&freeAbove>0&&subtotal>=freeAbove))ship=0;
   const total=subtotal+ship-discount;const num=parseInt((await pool.query('SELECT COALESCE(MAX(order_number),0)+1 as n FROM orders WHERE store_id=$1',[sid])).rows[0].n);const prefDcId=delivery_company_id||null;
   const initialStatus=(pm==='ccp'||pm==='baridimob')?'pending_payment':'new_order';
   const o=await pool.query('INSERT INTO orders(store_id,customer_id,order_number,customer_name,customer_phone,customer_email,shipping_address,shipping_city,shipping_wilaya,shipping_zip,subtotal,shipping_cost,discount,total,payment_method,notes,notification_preference,shipping_type,preferred_delivery_company_id,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING *',[sid,customer_id||null,num,customer_name,customer_phone,customer_email||null,shipping_address,shipping_city||null,shipping_wilaya||null,shipping_zip||null,subtotal,ship,discount,total,payment_method||'cod',notes||null,notification_preference||'whatsapp',sType,prefDcId,initialStatus]);try{await pool.query("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS weight NUMERIC DEFAULT 0");}catch(e){}for(const it of oi){await pool.query('INSERT INTO order_items(order_id,product_id,product_name,product_image,variant_info,quantity,unit_price,total_price,weight) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',[o.rows[0].id,it.product_id,it.product_name,it.product_image,it.variant_info,it.quantity,it.unit_price,it.total_price,it.weight||0]);}// Auto-add or update customer record so every buyer shows in the customers page.
@@ -399,6 +404,17 @@ router.post('/:slug/products/:pslug/reviews',async(req,res)=>{try{
   const{customer_name,customer_phone,rating,title,content}=req.body;
   if(!customer_name||!rating)return res.status(400).json({error:'Name and rating required'});
   if(rating<1||rating>5)return res.status(400).json({error:'Rating must be 1-5'});
+  // Verified buyers only: the phone must belong to an order in this store
+  // that contains this product and wasn't cancelled/returned.
+  const phoneDigits=String(customer_phone||'').replace(/\D/g,'');
+  if(phoneDigits.length<9)return res.status(400).json({error:'Enter the phone number you used to order this product.',code:'phone_required'});
+  const tail=phoneDigits.slice(-9);
+  const bought=await pool.query(`SELECT 1 FROM orders o JOIN order_items oi ON oi.order_id=o.id
+    WHERE o.store_id=$1 AND oi.product_id=$2 AND RIGHT(regexp_replace(COALESCE(o.customer_phone,''),'\\D','','g'),9)=$3
+      AND LOWER(COALESCE(o.status,'')) NOT IN ('cancelled','canceled','returned','refunded','failed') AND o.is_deleted IS NOT TRUE LIMIT 1`,[store.id,product.id,tail]);
+  if(!bought.rows.length)return res.status(403).json({error:'Only customers who bought this product can review it. Use the phone number from your order.',code:'not_a_buyer'});
+  const already=await pool.query(`SELECT 1 FROM reviews WHERE store_id=$1 AND product_id=$2 AND RIGHT(regexp_replace(COALESCE(customer_phone,''),'\\D','','g'),9)=$3 LIMIT 1`,[store.id,product.id,tail]);
+  if(already.rows.length)return res.status(409).json({error:'You have already reviewed this product.',code:'already_reviewed'});
 
   // Check if customer already reviewed this product
   if(customer_phone){

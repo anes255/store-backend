@@ -18,7 +18,7 @@ function ensureCols() {
 // Settings toggle that governs each notification type. Every type is on
 // unless the owner switches it off (customer alerts used to be opt-in, so
 // most stores never saw anything but new orders).
-const TOGGLE = { order: 'notify_orders', status: 'notify_orders', payment: 'notify_orders', stock: 'notify_stock', customer: 'notify_customers', review: 'notify_customers' };
+const TOGGLE = { order: 'notify_orders', status: 'notify_status', payment: 'notify_orders', stock: 'notify_stock', customer: 'notify_customers', review: 'notify_customers' };
 
 async function storeConfig(storeId) {
   try {
@@ -33,7 +33,10 @@ async function notifyStore(storeId, { type = 'info', title, message = '', link =
   try {
     const cfg = await storeConfig(storeId);
     const key = TOGGLE[type];
-    const enabled = !key ? true : cfg[key] !== false;
+    // Status changes have their own switch; stores that saved settings before
+    // it existed keep whatever they had chosen for order updates.
+    const val = key === 'notify_status' && cfg.notify_status === undefined ? cfg.notify_orders : cfg[key];
+    const enabled = !key ? true : val !== false;
     if (!enabled) return;
     await ensureCols();
     await pool.query(

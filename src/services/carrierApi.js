@@ -760,6 +760,12 @@ async function carrierCreateOrder(rawCfg, order, items) {
     if (data && data.success === false) return { ok: false, err: data.msg || data.detail || `Carrier rejected (HTTP ${r.status})`, status: r.status, carrier_response: data, request_url: finalUrl, request_body: sentBody, tried };
     if (!r.ok && r.status >= 400) return { ok: false, err: `HTTP ${r.status}: ${String(txt).slice(0, 200)}`, status: r.status, carrier_response: data || txt, request_url: finalUrl, request_body: sentBody, tried };
 
+    // A web page instead of an API answer (login page, maintenance page,
+    // wrong base URL) is not a confirmation — the parcel was not created.
+    if (!data && /<\s*(!doctype|html|head|body)\b/i.test(String(txt || ''))) {
+      return { ok: false, err: `${carrier} returned a web page instead of an API response (HTTP ${r.status}) — check the API URL and credentials in Shipping Partners.`, status: r.status, carrier_response: String(txt).slice(0, 500), request_url: finalUrl, request_body: sentBody, tried };
+    }
+
     // ── Extract tracking number ──
     let tracking = '';
 
