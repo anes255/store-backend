@@ -257,6 +257,11 @@ const initDb=async()=>{
       channel VARCHAR(20),recipient VARCHAR(255),message_type VARCHAR(50),content TEXT,
       status VARCHAR(20) DEFAULT 'sent',external_id VARCHAR(255),error_message TEXT,created_at TIMESTAMPTZ DEFAULT NOW()
     )`);console.log('✅ message_log ready');}catch(e){console.log('message_log:',e.message);}
+    // Every sender writes `message` and `error`, but the table only had
+    // `content` / `error_message`, so each insert failed and WhatsApp "Recent
+    // activity" stayed empty forever.
+    try{await pool.query("ALTER TABLE message_log ADD COLUMN IF NOT EXISTS message TEXT");}catch(e){}
+    try{await pool.query("ALTER TABLE message_log ADD COLUMN IF NOT EXISTS error TEXT");}catch(e){}
 
     try{await pool.query(`CREATE TABLE IF NOT EXISTS expenses(
       id UUID PRIMARY KEY DEFAULT gen_random_uuid(),store_id UUID REFERENCES stores(id),
@@ -475,6 +480,8 @@ const initDb=async()=>{
     // column was never created, so every visit was dropped and Analytics
     // showed 0 visits / 0% conversion.
     try{await pool.query("ALTER TABLE stores ADD COLUMN IF NOT EXISTS total_visits INT DEFAULT 0");}catch(e){}
+    // Order in which the store's delivery companies are listed at checkout.
+    try{await pool.query("ALTER TABLE delivery_companies ADD COLUMN IF NOT EXISTS sort_order INT");}catch(e){}
     // One-off cleanup: hide the empty orders earlier carrier syncs created.
     // Soft delete (is_deleted) so they stay recoverable from the vault view.
     try{await pool.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN DEFAULT FALSE");}catch(e){}

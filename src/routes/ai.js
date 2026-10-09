@@ -121,7 +121,7 @@ router.post('/cart-recovery/send',async(req,res)=>{try{
     const chName=ch==='EMAIL'?'Email':'WhatsApp';
     const title=sent?`Manual recovery sent (${chName})`:`Manual recovery failed (${chName})`;
     const msg=sent?`Recovery message sent to ${recipient}`:`Failed to send recovery to ${recipient}`;
-    try{await pool.query("INSERT INTO notifications(store_id,type,title,message,link) VALUES($1,'cart_recovery',$2,$3,'/dashboard/cart-recovery')",[store_id,title,msg]);}catch{}
+    try{await pool.query("INSERT INTO notifications(store_id,type,title,message,link) VALUES($1,'cart_recovery',$2,$3,'/dashboard/abandoned')",[store_id,title,msg]);}catch{}
   }
 
   res.json({sent:true,channel:ch,...result});
@@ -325,6 +325,42 @@ router.post('/whatsapp-qr/send', async (req, res) => {
     try { await pool.query('INSERT INTO message_log(store_id,channel,recipient,message,status,error) VALUES($1,$2,$3,$4,$5,$6)', [storeId, 'whatsapp', phone, (message || '').substring(0, 200), data.success ? 'sent' : 'failed', data.reason || null]); } catch (e) {}
     if (data.success) res.json(data); else res.status(400).json(data);
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── WhatsApp settings: Recent activity + counters ──
+// The settings modal asks for these two endpoints; they did not exist.
+const { authMiddleware: _waAuth } = require('../middleware/auth');
+async function _waOwns(req, storeId) {
+  if (req.user?.role === 'store_staff') return String(req.user.store_id || req.user.storeId || '') === String(storeId);
+  const r = await pool.query('SELECT 1 FROM stores WHERE id=$1 AND owner_id=$2', [storeId, req.user?.id]);
+  return r.rowCount > 0;
+}
+async function _waLogCols() {
+  try { await pool.query('ALTER TABLE message_log ADD COLUMN IF NOT EXISTS message TEXT'); } catch {}
+  try { await pool.query('ALTER TABLE message_log ADD COLUMN IF NOT EXISTS error TEXT'); } catch {}
+}
+router.get('/wa/:storeId/recent', _waAuth(['store_owner', 'store_staff']), async (req, res) => {
+  try {
+    if (!(await _waOwns(req, req.params.storeId))) return res.status(403).json({ error: 'Forbidden' });
+    await _waLogCols();
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 50));
+    const r = await pool.query(`SELECT id, created_at, recipient, status, COALESCE(message_type,'order') AS type,
+        COALESCE(to_jsonb(message_log)->>'message', content) AS message, COALESCE(to_jsonb(message_log)->>'error', error_message) AS error, channel
+      FROM message_log WHERE store_id=$1 AND COALESCE(channel,'whatsapp')='whatsapp' ORDER BY created_at DESC LIMIT ${limit}`, [req.params.storeId]);
+    res.json({ messages: r.rows.map(m => ({ ...m, delivered: m.status === 'sent' })) });
+  } catch (e) { res.json({ messages: [], error: e.message }); }
+});
+router.get('/wa/:storeId/stats', _waAuth(['store_owner', 'store_staff']), async (req, res) => {
+  try {
+    if (!(await _waOwns(req, req.params.storeId))) return res.status(403).json({ error: 'Forbidden' });
+    const r = (await pool.query(`SELECT
+        COUNT(*) FILTER (WHERE created_at >= date_trunc('day', NOW()))::int AS sent_today,
+        COUNT(*) FILTER (WHERE status='sent')::int AS delivered,
+        COUNT(*) FILTER (WHERE status<>'sent')::int AS failed,
+        COUNT(*)::int AS total
+      FROM message_log WHERE store_id=$1 AND COALESCE(channel,'whatsapp')='whatsapp'`, [req.params.storeId])).rows[0] || {};
+    res.json({ sent_today: r.sent_today || 0, delivered: r.delivered || 0, failed: r.failed || 0, success_rate: r.total ? Math.round((r.delivered / r.total) * 100) : 100 });
+  } catch (e) { res.json({ sent_today: 0, delivered: 0, failed: 0, success_rate: 100 }); }
 });
 
 router.get('/whatsapp-qr/log/:storeId', async (req, res) => {

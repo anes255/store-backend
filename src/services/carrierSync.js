@@ -134,7 +134,7 @@ async function updateTracking(storeId, order, dc) {
     if (ourStatus && ourStatus !== order.status) {
       try {
         const { notifyStore, statusLabel } = require('./notify');
-        notifyStore(storeId, { type: 'status', title: `Order #${order.order_number} → ${statusLabel(ourStatus)}`, message: order.customer_name || '', link: '/dashboard/orders' });
+        notifyStore(storeId, { type: 'status', title: `Order #${order.order_number} → ${statusLabel(ourStatus)}`, message: order.customer_name || '', link: '/dashboard/orders?highlight=' + order.id });
       } catch {}
     }
     return { status: normalized, raw: extractedStatus, history };

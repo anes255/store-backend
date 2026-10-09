@@ -363,33 +363,43 @@ function generateOrderMessage(storeConfig, status, orderData, language = 'ar') {
   const fmtNum = (v) => (v == null || v === '' ? '' : (Number(v) || 0).toLocaleString());
   const wilayaName = String(orderData.shipping_wilaya || '');
   const communeName = String(orderData.shipping_city || '');
+  // Per-line helpers. Orders with several products used to show only the
+  // first product's price (and variant) in WhatsApp/email messages.
+  const cur = orderData.currency || 'DZD';
+  const itemsArr = Array.isArray(orderData.items) ? orderData.items : [];
+  const lineQty = (i) => parseInt(i.quantity) || 1;
+  const lineUnit = (i) => Number(i.unit_price ?? i.price) || 0;
+  const lineTotal = (i) => Number(i.total_price) || lineUnit(i) * lineQty(i);
+  const variantOf = (i) => {
+    let v = i.variant_info ?? i.variant;
+    if (!v) return '';
+    if (typeof v === 'string') { try { v = JSON.parse(v); } catch { return v; } }
+    if (!v || typeof v !== 'object') return String(v);
+    if (v.label) return String(v.label);
+    if (Array.isArray(v.selections)) return v.selections.map(x => x.name || x.value).filter(Boolean).join(' / ');
+    return v.name || v.value || '';
+  };
   const productList = (() => {
     if (orderData.product_list) return String(orderData.product_list);
-    if (Array.isArray(orderData.items)) {
-      return orderData.items.map(i => `• ${i.product_name || i.name || 'Item'} ×${i.quantity || 1}`).join('\n');
-    }
-    return '';
+    return itemsArr.map(i => {
+      const vt = variantOf(i);
+      return `• ${i.product_name || i.name || 'Item'}${vt ? ` (${vt})` : ''} ×${lineQty(i)} — ${fmtNum(lineTotal(i))} ${cur}`;
+    }).join('\n');
   })();
   const productName = (() => {
     if (orderData.product_name) return String(orderData.product_name);
-    if (Array.isArray(orderData.items) && orderData.items[0]) return orderData.items[0].product_name || orderData.items[0].name || '';
-    return '';
+    return itemsArr.map(i => i.product_name || i.name || '').filter(Boolean).join(', ');
   })();
   const productPrice = (() => {
     if (orderData.product_price != null) return fmtNum(orderData.product_price);
-    if (Array.isArray(orderData.items) && orderData.items[0]) return fmtNum(orderData.items[0].unit_price ?? orderData.items[0].price);
-    return '';
+    if (!itemsArr.length) return '';
+    if (itemsArr.length === 1) return fmtNum(lineUnit(itemsArr[0]));
+    // Several products: every line's price, e.g. "1,500 + 2,000 + 800".
+    return itemsArr.map(i => fmtNum(lineTotal(i))).join(' + ');
   })();
   const variantStr = (() => {
     if (orderData.variant) return String(orderData.variant);
-    if (Array.isArray(orderData.items) && orderData.items[0]) {
-      const v = orderData.items[0].variant_info || orderData.items[0].variant;
-      if (!v) return '';
-      if (typeof v === 'string') return v;
-      if (Array.isArray(v?.selections)) return v.selections.map(s => s.name || s.value).filter(Boolean).join(' / ');
-      return v.name || v.value || '';
-    }
-    return '';
+    return itemsArr.map(variantOf).filter(Boolean).join(', ');
   })();
   const totalQty = (() => {
     if (orderData.quantity != null) return String(orderData.quantity);

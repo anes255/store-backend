@@ -53,7 +53,7 @@ router.get('/:slug/delivery-companies', async (req, res) => {
   try {
     const store = (await pool.query('SELECT id FROM stores WHERE slug=$1', [req.params.slug])).rows[0];
     if (!store) return res.json([]);
-    const r = await pool.query('SELECT id,name,provider_type,tracking_url,logo,base_rate,COALESCE(is_default,FALSE) AS is_default FROM delivery_companies WHERE store_id=$1 AND is_active IS NOT FALSE ORDER BY is_default DESC,name', [store.id]);
+    const r = await pool.query('SELECT id,name,provider_type,tracking_url,logo,base_rate,COALESCE(is_default,FALSE) AS is_default FROM delivery_companies WHERE store_id=$1 AND is_active IS NOT FALSE ORDER BY sort_order NULLS LAST,is_default DESC,name', [store.id]);
     res.json(r.rows);
   } catch { res.json([]); }
 });
@@ -148,19 +148,19 @@ router.get('/:slug/shipping-wilayas',async(req,res)=>{try{
 router.get('/:slug/products',async(req,res)=>{try{const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.status(404).json({error:'Not found'});const{search,category,sort,featured}=req.query;let q='SELECT * FROM products WHERE store_id=$1 AND is_active=TRUE';const p=[store.id];if(category){p.push(category);q+=` AND category_id=$${p.length}`;}if(search){p.push(`%${search}%`);q+=` AND name ILIKE $${p.length}`;}if(featured==='true')q+=' AND is_featured=TRUE';if(sort==='price_asc')q+=' ORDER BY price ASC';else if(sort==='price_desc')q+=' ORDER BY price DESC';else q+=' ORDER BY created_at DESC';q+=' LIMIT 50';const r=await pool.query(q,p);const products=r.rows.map(x=>{let imgs=x.images;if(typeof imgs==='string')try{imgs=JSON.parse(imgs);}catch(e){imgs=[];}if(!Array.isArray(imgs))imgs=[];return{...x,name_en:x.name,name_fr:x.name,name_ar:x.name,thumbnail:imgs[0]||null,compare_at_price:x.compare_price};});const count=await pool.query('SELECT COUNT(*) FROM products WHERE store_id=$1 AND is_active=TRUE',[store.id]);res.json({products,total:parseInt(count.rows[0].count)});}catch(e){res.status(500).json({error:e.message});}});
 
 // Single product
-router.get('/:slug/products/:pslug',async(req,res)=>{try{const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.status(404).json({error:'Not found'});const r=await pool.query('SELECT * FROM products WHERE store_id=$1 AND slug=$2 AND is_active=TRUE',[store.id,req.params.pslug]);if(!r.rows.length)return res.status(404).json({error:'Not found'});const p=r.rows[0];let imgs=p.images;if(typeof imgs==='string')try{imgs=JSON.parse(imgs);}catch(e){imgs=[];}if(!Array.isArray(imgs))imgs=[];res.json({...p,name_en:p.name,name_fr:p.name,name_ar:p.name,description_en:p.description,thumbnail:imgs[0]||null,compare_at_price:p.compare_price,allow_oversell:!!p.allow_oversell,reviews:[]});}catch(e){res.status(500).json({error:e.message});}});
+router.get('/:slug/products/:pslug',async(req,res)=>{try{const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.status(404).json({error:'Not found'});const r=await pool.query('SELECT * FROM products WHERE store_id=$1 AND slug=$2 AND is_active=TRUE',[store.id,req.params.pslug]);if(!r.rows.length)return res.status(404).json({error:'Not found'});const p=r.rows[0];let imgs=p.images;if(typeof imgs==='string')try{imgs=JSON.parse(imgs);}catch(e){imgs=[];}if(!Array.isArray(imgs))imgs=[];let category_name=null;if(p.category_id){try{category_name=(await pool.query('SELECT name FROM categories WHERE id=$1 AND store_id=$2',[p.category_id,store.id])).rows[0]?.name||null;}catch(e){}}res.json({...p,category_name,name_en:p.name,name_fr:p.name,name_ar:p.name,description_en:p.description,thumbnail:imgs[0]||null,compare_at_price:p.compare_price,allow_oversell:!!p.allow_oversell,reviews:[]});}catch(e){res.status(500).json({error:e.message});}});
 
 // Categories
 router.get('/:slug/categories',async(req,res)=>{try{const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.json([]);const r=await pool.query('SELECT * FROM categories WHERE store_id=$1 AND is_active=TRUE ORDER BY sort_order',[store.id]);res.json(r.rows.map(c=>({...c,name_en:c.name,name_fr:c.name,name_ar:c.name})));}catch(e){res.json([]);}});
 
 // Customer register (per store)
-router.post('/:slug/customers/register',async(req,res)=>{try{const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.status(404).json({error:'Not found'});const{name,email,phone,password,address,city,wilaya}=req.body;if(!name||!phone||!password)return res.status(400).json({error:'Name, phone, password required'});
+router.post('/:slug/customers/register',async(req,res)=>{try{const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.status(404).json({error:'Not found'});const{name,email,phone,password,address,city,wilaya}=req.body;if(!name||!phone||!password)return res.status(400).json({error:'Name, phone, password required'});if(!/^(0[567]\d{8}|\+?213[567]\d{8})$/.test(String(phone).replace(/[\s.-]/g,'')))return res.status(400).json({error:'Please enter a valid Algerian mobile number (e.g. 0555123456)'});
   // Block registration if phone/email is already used by a store admin or platform admin
   const ownerDup=await pool.query('SELECT 1 FROM store_owners WHERE phone=$1 OR (email IS NOT NULL AND email=$2) LIMIT 1',[phone,email||null]).catch(()=>({rows:[]}));
   if(ownerDup.rows.length)return res.status(409).json({error:'This phone or email belongs to a store admin. Please use a different one.'});
   const paDup=await pool.query("SELECT 1 FROM platform_admins WHERE phone=$1 OR (email IS NOT NULL AND email=$2) LIMIT 1",[phone,email||null]).catch(()=>({rows:[]}));
   if(paDup.rows.length)return res.status(409).json({error:'This phone or email belongs to a platform admin. Please use a different one.'});
-  const dup=await pool.query('SELECT id FROM customers WHERE store_id=$1 AND phone=$2',[store.id,phone]);if(dup.rows.length)return res.status(409).json({error:'Phone registered'});const hash=await bcrypt.hash(password,12);const r=await pool.query('INSERT INTO customers(store_id,full_name,email,phone,password_hash,address,city,wilaya) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,full_name,email,phone,address,city,wilaya',[store.id,name,email||null,phone,hash,address||null,city||null,wilaya||null]);const c=r.rows[0];const token=generateToken({id:c.id,role:'customer',storeId:store.id,name:c.full_name});try{const{notifyStore}=require('../services/notify');notifyStore(store.id,{type:'customer',title:`New customer: ${name||phone}`,message:phone||'',link:'/dashboard/customers'});}catch(e){}res.status(201).json({token,customer:{id:c.id,name:c.full_name,email:c.email,phone:c.phone,address:c.address,city:c.city,wilaya:c.wilaya}});}catch(e){res.status(500).json({error:e.message});}});
+  const dup=await pool.query('SELECT id FROM customers WHERE store_id=$1 AND phone=$2',[store.id,phone]);if(dup.rows.length)return res.status(409).json({error:'Phone registered'});const hash=await bcrypt.hash(password,12);const r=await pool.query('INSERT INTO customers(store_id,full_name,email,phone,password_hash,address,city,wilaya) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,full_name,email,phone,address,city,wilaya',[store.id,name,email||null,phone,hash,address||null,city||null,wilaya||null]);const c=r.rows[0];const token=generateToken({id:c.id,role:'customer',storeId:store.id,name:c.full_name});try{const{notifyStore}=require('../services/notify');notifyStore(store.id,{type:'customer',title:`New customer: ${name||phone}`,message:phone||'',link:'/dashboard/customers?highlight='+c.id});}catch(e){}res.status(201).json({token,customer:{id:c.id,name:c.full_name,email:c.email,phone:c.phone,address:c.address,city:c.city,wilaya:c.wilaya}});}catch(e){res.status(500).json({error:e.message});}});
 
 // Customer login
 router.post('/:slug/customers/login',async(req,res)=>{try{const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.status(404).json({error:'Not found'});const{phone,password}=req.body;const c=(await pool.query('SELECT * FROM customers WHERE store_id=$1 AND phone=$2',[store.id,phone])).rows[0];if(!c)return res.status(401).json({error:'Invalid'});if(!(await bcrypt.compare(password,c.password_hash)))return res.status(401).json({error:'Invalid'});const token=generateToken({id:c.id,role:'customer',storeId:store.id,name:c.full_name});res.json({token,customer:{id:c.id,name:c.full_name,email:c.email,phone:c.phone,address:c.address||null,city:c.city||null,wilaya:c.wilaya||null}});}catch(e){res.status(500).json({error:e.message});}});
@@ -197,9 +197,21 @@ router.get('/:slug/customers/profile',authMiddleware([]),async(req,res)=>{try{co
     }catch(e){}
   }
   res.json({...c,name:c.full_name,orders:orders.map(o=>({...o,order_number:formatOrderNumber(o.order_number,storeCfg2),discount_amount:o.discount,items:itemsByOrder[o.id]||[]}))});}catch(e){res.status(500).json({error:e.message});}});
+// Change password (signed-in customer): needs the current password.
+router.put('/:slug/customers/password',authMiddleware([]),async(req,res)=>{try{
+  const{current_password,new_password}=req.body||{};
+  if(!current_password||!new_password)return res.status(400).json({error:'Current and new password are required'});
+  if(String(new_password).length<6)return res.status(400).json({error:'The new password must be at least 6 characters'});
+  const c=(await pool.query('SELECT id,password_hash FROM customers WHERE id=$1',[req.user.id])).rows[0];
+  if(!c)return res.status(403).json({error:'Not a customer account'});
+  if(!c.password_hash||!(await bcrypt.compare(current_password,c.password_hash)))return res.status(401).json({error:'Current password is incorrect',code:'wrong_password'});
+  await pool.query('UPDATE customers SET password_hash=$1 WHERE id=$2',[await bcrypt.hash(new_password,12),c.id]);
+  res.json({ok:true});
+}catch(e){res.status(500).json({error:e.message});}});
 router.put('/:slug/customers/profile',authMiddleware([]),async(req,res)=>{try{const exists=(await pool.query('SELECT 1 FROM customers WHERE id=$1',[req.user.id])).rows[0];if(!exists)return res.status(403).json({error:'Not a customer account'});const b=req.body||{};
   // Make sure the profile_picture column exists (older databases may not have it).
   try{await pool.query('ALTER TABLE customers ADD COLUMN IF NOT EXISTS profile_picture TEXT');}catch(e){}
+  if(b.phone&&!/^(0[567]\d{8}|\+?213[567]\d{8})$/.test(String(b.phone).replace(/[\s.-]/g,'')))return res.status(400).json({error:'Please enter a valid Algerian mobile number (e.g. 0555123456)'});
   // Phone change dedup: block if phone collides with an admin account or another customer
   if(b.phone){
     const ownerDup=await pool.query('SELECT 1 FROM store_owners WHERE phone=$1 LIMIT 1',[b.phone]).catch(()=>({rows:[]}));
@@ -213,6 +225,19 @@ router.put('/:slug/customers/profile',authMiddleware([]),async(req,res)=>{try{co
   const c=(await pool.query('SELECT * FROM customers WHERE id=$1',[req.user.id])).rows[0];res.json({...c,name:c.full_name});}catch(e){res.status(500).json({error:e.message});}});
 
 // Checkout
+// Store-wide coupons (Offers → Coupons): each is a percentage OR a fixed
+// amount. Fixed-amount coupons were always treated as a percentage, so a
+// "500 DZD off" code took 500% / some other amount off.
+function storeCouponDiscount(cfg,upperCode,subtotal){
+  cfg=cfg||{};
+  const all=[{active:cfg.store_coupon_active,code:cfg.store_coupon_code,value:parseFloat(cfg.store_coupon_discount_percent)||0,type:cfg.store_coupon_discount_type}];
+  if(Array.isArray(cfg.extra_coupons))cfg.extra_coupons.forEach(c=>all.push({active:c.active,code:c.code,value:parseFloat(c.discount)||0,type:c.discount_type}));
+  const sc=all.find(c=>c.active&&String(c.code||'').trim().toUpperCase()===upperCode&&c.value>0);
+  if(!sc)return null;
+  const sub=Math.max(0,parseFloat(subtotal)||0);
+  const discount=sc.type==='fixed'?Math.min(sub,Math.round(sc.value)):Math.round(sub*(sc.value/100));
+  return{discount,type:sc.type==='fixed'?'fixed':'percent',value:sc.value};
+}
 router.post('/:slug/orders',async(req,res)=>{try{let offerFreeShip=false;const store=(await pool.query('SELECT * FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.status(404).json({error:'Not found'});const sid=store.id;const{items,customer_name,customer_phone,customer_email,shipping_address,shipping_city,shipping_wilaya,shipping_zip,shipping_type,payment_method,notes,customer_id,notification_preference,delivery_company_id}=req.body;if(!items||!items.length)return res.status(400).json({error:'Cart empty'});if(!customer_name||!customer_phone||!shipping_address)return res.status(400).json({error:'Info required'});let subtotal=0;const oi=[];let storeCfg=store.config||{};if(typeof storeCfg==='string'){try{storeCfg=JSON.parse(storeCfg);}catch{storeCfg={};}}const allowStoreOversell=storeCfg.allow_oversell===true;for(const it of items){const p=(await pool.query('SELECT * FROM products WHERE id=$1 AND store_id=$2',[it.product_id,sid])).rows[0];if(!p)return res.status(400).json({error:`Product not found: ${it.product_id}`});
   // Check stock — block the whole order if any item is out of stock and oversell is disabled
   if(p.stock_quantity!==null&&p.stock_quantity<(it.quantity||1)&&!p.allow_oversell&&!allowStoreOversell&&p.track_inventory!==false){
@@ -249,11 +274,9 @@ router.post('/:slug/orders',async(req,res)=>{try{let offerFreeShip=false;const s
   const couponCode=(req.body.coupon_code||'').trim().toUpperCase();
   if(couponCode){
     const cfg=storeCfg;
-    const allSC=[{active:cfg.store_coupon_active,code:cfg.store_coupon_code,pct:parseFloat(cfg.store_coupon_discount_percent)||0}];
-    if(Array.isArray(cfg.extra_coupons))cfg.extra_coupons.forEach(c=>allSC.push({active:c.active,code:c.code,pct:parseFloat(c.discount)||0}));
-    const matchedSC=allSC.find(sc=>sc.active&&String(sc.code||'').trim().toUpperCase()===couponCode&&sc.pct>0);
+    const matchedSC=storeCouponDiscount(cfg,couponCode,subtotal);
     if(matchedSC){
-      discount=Math.round(subtotal*(matchedSC.pct/100));
+      discount=matchedSC.discount;
     }else{
       const cpProducts=await pool.query('SELECT id,price,coupon_code,coupon_discount_percent,coupon_active FROM products WHERE store_id=$1 AND coupon_active=TRUE AND coupon_code IS NOT NULL',[sid]);
       const cpMatching=cpProducts.rows.filter(p=>String(p.coupon_code||'').trim().toUpperCase()===couponCode);
@@ -283,7 +306,7 @@ if (custId) {
       const nc = await pool.query('INSERT INTO customers(store_id,full_name,email,phone,address,city,wilaya,total_orders,total_spent) VALUES($1,$2,$3,$4,$5,$6,$7,1,$8) RETURNING id',[sid,customer_name,customer_email||null,customer_phone,shipping_address||null,shipping_city||null,shipping_wilaya||null,total]);
       custId = nc.rows[0]?.id;
       // First order from this phone creates the customer: tell the owner.
-      try{const{notifyStore}=require('../services/notify');notifyStore(sid,{type:'customer',title:`New customer: ${customer_name||customer_phone}`,message:customer_phone||'',link:'/dashboard/customers'});}catch(e){}
+      try{const{notifyStore}=require('../services/notify');notifyStore(sid,{type:'customer',title:`New customer: ${customer_name||customer_phone}`,message:customer_phone||'',link:'/dashboard/customers?highlight='+custId});}catch(e){}
     }
     // Link the order to the customer so it shows in their profile
     if (custId) await pool.query('UPDATE orders SET customer_id=$1 WHERE id=$2',[custId,o.rows[0].id]);
@@ -291,7 +314,7 @@ if (custId) {
 }
 // Auto-create notification for store owner — skip for pending_payment (receipt not yet submitted)
 if(initialStatus!=='pending_payment'){
-try{const{notifyStore}=require('../services/notify');const _first=oi[0]||{};const _more=oi.length>1?` +${oi.length-1}`:'';notifyStore(sid,{type:'order',title:`${_first.product_name||'Order'}${_more}`,message:`${Number(total).toLocaleString()} ${store.currency||'DZD'} · #${num}`,image:_first.product_image||null,link:'/dashboard/orders'});}catch(e){}
+try{const{notifyStore}=require('../services/notify');const _first=oi[0]||{};const _more=oi.length>1?` +${oi.length-1}`:'';notifyStore(sid,{type:'order',title:`${_first.product_name||'Order'}${_more}`,message:`${Number(total).toLocaleString()} ${store.currency||'DZD'} · #${num}`,image:_first.product_image||null,link:'/dashboard/orders?highlight='+o.rows[0].id});}catch(e){}
 // (push is sent by notifyStore above)
 // Send WhatsApp notification to buyer for new order
 try{
@@ -345,7 +368,7 @@ router.post('/:slug/orders/:oid/cancel',async(req,res)=>{try{
   const r=await pool.query("UPDATE orders SET status='cancelled',cancelled_at=NOW(),cancel_reason='Cancelled by customer',updated_at=NOW() WHERE id=$1 RETURNING *",[order.id]);
   // Notify store owner
   const orderNum=formatOrderNumber(order.order_number,store.config||{});
-  try{await pool.query("INSERT INTO notifications(store_id,type,title,message,link) VALUES($1,'order',$2,$3,$4)",[store.id,`Order ${orderNum} cancelled by customer`,`${order.customer_name} cancelled their order (${order.total} DZD)`,'/dashboard/orders']);}catch(e){}
+  try{await pool.query("INSERT INTO notifications(store_id,type,title,message,link) VALUES($1,'order',$2,$3,$4)",[store.id,`Order ${orderNum} cancelled by customer`,`${order.customer_name} cancelled their order (${order.total} DZD)`,'/dashboard/orders?highlight='+order.id]);}catch(e){}
   try{const{sendStorePush}=require('./storeOwner');sendStorePush(store.id,`Order ${orderNum} cancelled`,`${order.customer_name} cancelled their order`);}catch(e){}
   res.json(r.rows[0]);
 }catch(e){res.status(500).json({error:e.message});}});
@@ -359,14 +382,8 @@ router.post('/:slug/validate-coupon',async(req,res)=>{try{
   const upper=String(code).trim().toUpperCase();
   const cfg=store.config||{};
   // Check store-wide coupons from config (primary + extra)
-  const allStoreCoupons=[{active:cfg.store_coupon_active,code:cfg.store_coupon_code,pct:parseFloat(cfg.store_coupon_discount_percent)||0}];
-  if(Array.isArray(cfg.extra_coupons))cfg.extra_coupons.forEach(c=>allStoreCoupons.push({active:c.active,code:c.code,pct:parseFloat(c.discount)||0}));
-  for(const sc of allStoreCoupons){
-    if(sc.active&&String(sc.code||'').trim().toUpperCase()===upper&&sc.pct>0){
-      const discount=Math.round((parseFloat(subtotal)||0)*(sc.pct/100));
-      return res.json({valid:true,discount,type:'store_wide',percent:sc.pct});
-    }
-  }
+  const sc=storeCouponDiscount(cfg,upper,subtotal);
+  if(sc)return res.json({valid:true,discount:sc.discount,type:'store_wide',discount_type:sc.type,value:sc.value,percent:sc.type==='percent'?sc.value:undefined});
   // Check per-product coupons
   const products=await pool.query('SELECT id,price,coupon_code,coupon_discount_percent,coupon_active FROM products WHERE store_id=$1 AND coupon_active=TRUE AND coupon_code IS NOT NULL',[store.id]);
   const matching=products.rows.filter(p=>String(p.coupon_code||'').trim().toUpperCase()===upper);
@@ -439,7 +456,7 @@ router.post('/:slug/products/:pslug/reviews',async(req,res)=>{try{
     'INSERT INTO reviews(store_id,product_id,customer_name,customer_phone,rating,title,content,is_approved,ai_moderation_score,ai_moderation_reason) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *',
     [store.id,product.id,customer_name,customer_phone||null,rating,title||null,content||null,autoApprove,aiScore,aiReason]
   );
-  try{const{notifyStore}=require('../services/notify');notifyStore(store.id,{type:'review',title:`New ${rating}★ review: ${product.name||''}`.trim(),message:`${customer_name||''}${autoApprove?'':' (awaiting approval)'}`,link:'/dashboard/smart-reviews'});}catch(e){}
+  try{const{notifyStore}=require('../services/notify');notifyStore(store.id,{type:'review',title:`New ${rating}★ review: ${product.name||''}`.trim(),message:`${customer_name||''}${autoApprove?'':' (awaiting approval)'}`,link:'/dashboard/smart-reviews?highlight='+r.rows[0].id});}catch(e){}
   res.status(201).json({...r.rows[0],auto_approved:autoApprove});
 }catch(e){res.status(500).json({error:e.message});}});
 

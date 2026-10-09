@@ -79,7 +79,7 @@ async function checkStockAlert(storeId, productId, prev) {
     else if (left > 0 && left <= lowAt && (before == null || before > lowAt)) title = `Low stock: ${p.name}`;
     if (!title) return;
     let im = p.images; if (typeof im === 'string') { try { im = JSON.parse(im); } catch { im = []; } }
-    await notifyStore(storeId, { type: 'stock', title, message: `${left} left`, link: '/dashboard/stock', image: Array.isArray(im) && typeof im[0] === 'string' ? im[0] : null });
+    await notifyStore(storeId, { type: 'stock', title, message: `${left} left`, link: '/dashboard/stock?highlight=' + productId, image: Array.isArray(im) && typeof im[0] === 'string' ? im[0] : null });
   } catch (e) { console.log('[notify stock]', e.message); }
 }
 

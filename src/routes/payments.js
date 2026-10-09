@@ -145,9 +145,9 @@ router.post('/receipt/upload',async(req,res)=>{try{
     [payment_method||'ccp',reference_number||r.rows[0].id,order_id]);
 
   // Every receipt needs the owner's review, so always notify about it.
-  try{const{notifyStore}=require('../services/notify');notifyStore(store.id,{type:'payment',title:`Payment receipt for order #${prevOrder?.order_number||''}`,message:`${prevOrder?.customer_name||''} | ${(payment_method||'ccp').toUpperCase()}${reference_number?' '+reference_number:''}`,link:'/dashboard/orders'});}catch(e){}
+  try{const{notifyStore}=require('../services/notify');notifyStore(store.id,{type:'payment',title:`Payment receipt for order #${prevOrder?.order_number||''}`,message:`${prevOrder?.customer_name||''} | ${(payment_method||'ccp').toUpperCase()}${reference_number?' '+reference_number:''}`,link:'/dashboard/orders?highlight='+order_id});}catch(e){}
   if(prevOrder&&prevOrder.status==='pending_payment'){
-    try{await pool.query("INSERT INTO notifications(store_id,type,title,message,link) VALUES($1,'order',$2,$3,$4)",[store.id,`New order #${prevOrder.order_number}`,`${prevOrder.customer_name} placed an order for ${prevOrder.total} ${store.currency||'DZD'}`,'/dashboard/orders']);}catch{}
+    try{await pool.query("INSERT INTO notifications(store_id,type,title,message,link) VALUES($1,'order',$2,$3,$4)",[store.id,`New order #${prevOrder.order_number}`,`${prevOrder.customer_name} placed an order for ${prevOrder.total} ${store.currency||'DZD'}`,'/dashboard/orders?highlight='+order_id]);}catch{}
     try{const{sendStorePush}=require('./storeOwner');sendStorePush(store.id,`New order #${prevOrder.order_number}`,`${prevOrder.customer_name} — ${prevOrder.total} ${store.currency||'DZD'}`);}catch{}
   }
 
