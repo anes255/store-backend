@@ -1,4 +1,9 @@
 const express=require('express'),router=express.Router(),pool=require('../config/db');
+// Dashboard-only AI / messaging routes require a store-owner (or staff) login.
+// Store-scoped ones also check the store belongs to the caller (URL or body).
+const { authMiddleware: _auth } = require('../middleware/auth');
+const _owner = _auth(['store_owner']);
+const _ownerStore = _auth(['store_owner'], { bodyStore: true });
 const chatbot=require('../services/chatbot');
 const messaging=require('../services/messaging');
 
@@ -9,7 +14,7 @@ router.get('/version',(req,res)=>res.json({version:'ai-v23-2026-06-40templates-c
 router.get('/pixels/verify',(req,res)=>res.json({ok:true,info:'POST {type,value} to verify a pixel ID against the vendor in real time.'}));
 
 // WhatsApp diagnostic
-router.get('/whatsapp-debug',async(req,res)=>{
+router.get('/whatsapp-debug', _auth(['platform_admin']), async(req,res)=>{
   const token=process.env.META_WHATSAPP_TOKEN;
   const phoneId=process.env.META_PHONE_NUMBER_ID;
   const result={token_set:!!token,token_length:token?token.length:0,token_preview:token?token.substring(0,20)+'...':'NOT SET',phone_id_set:!!phoneId,phone_id:phoneId||'NOT SET'};
@@ -24,7 +29,7 @@ router.get('/whatsapp-debug',async(req,res)=>{
 });
 
 // WhatsApp send test with full debug
-router.post('/whatsapp-test',async(req,res)=>{
+router.post('/whatsapp-test', _owner, async(req,res)=>{
   const token=process.env.META_WHATSAPP_TOKEN;
   const phoneId=process.env.META_PHONE_NUMBER_ID;
   if(!token||!phoneId)return res.status(400).json({error:'META_WHATSAPP_TOKEN or META_PHONE_NUMBER_ID not set on Render'});
@@ -43,7 +48,7 @@ router.post('/whatsapp-test',async(req,res)=>{
 });
 
 // Fake order detection — AI-powered
-router.post('/detect-fake',async(req,res)=>{try{
+router.post('/detect-fake', _owner, async(req,res)=>{try{
   const order=req.body.order||req.body;
   const store_id=req.body.store_id||order.store_id;
   const customer_phone=order.customer_phone||'';
@@ -83,7 +88,7 @@ router.post('/detect-fake',async(req,res)=>{try{
 }catch(e){res.status(500).json({error:'Detection failed'});}});
 
 // Cart recovery suggestions
-router.post('/cart-recovery/suggest',async(req,res)=>{
+router.post('/cart-recovery/suggest', _owner, async(req,res)=>{
   res.json({messages:[
     {sequence:1,delay:'30m',message:'👋 You left items in your cart! Complete your order before they sell out.'},
     {sequence:2,delay:'6h',message:'⏰ Your items are still waiting! Limited stock available.'},
@@ -92,7 +97,7 @@ router.post('/cart-recovery/suggest',async(req,res)=>{
 });
 
 // Send cart recovery message manually
-router.post('/cart-recovery/send',async(req,res)=>{try{
+router.post('/cart-recovery/send', _ownerStore, async(req,res)=>{try{
   const{store_id,customer_phone,customer_email,message,channel}=req.body;
   
   // Get store config for channel preference
@@ -128,7 +133,7 @@ router.post('/cart-recovery/send',async(req,res)=>{try{
 }catch(e){res.status(500).json({error:e.message});}});
 
 // Send order notification (called internally or via API)
-router.post('/notify/order',async(req,res)=>{try{
+router.post('/notify/order', _ownerStore, async(req,res)=>{try{
   const{store_id,order_id,type}=req.body; // type: 'confirmed','shipped','delivered'
   
   const store=(await pool.query('SELECT * FROM stores WHERE id=$1',[store_id])).rows[0];
@@ -201,7 +206,7 @@ router.get('/test',async(req,res)=>{try{
 }catch(e){res.status(500).json({error:e.message});}});
 
 // Test AI chatbot — for admin testing
-router.post('/test-chat',async(req,res)=>{try{
+router.post('/test-chat', _owner, async(req,res)=>{try{
   const{message,store_name,history,language}=req.body;
   const testStore={name:store_name||'Test Store',store_name:store_name||'Test Store',currency:'DZD',contact_phone:'0555123456',enable_cod:true,enable_ccp:true,enable_baridimob:true,products_summary:'Products: Test Product 1 (2500 DZD), Test Product 2 (4000 DZD)'};
   const result=await chatbot.chat({message:message||'hello',store:testStore,history:history||[],language:language||'en'});
@@ -209,7 +214,7 @@ router.post('/test-chat',async(req,res)=>{try{
 }catch(e){console.error('[Test Chat Error]',e);res.status(500).json({error:e.message});}});
 
 // Test send message — for admin testing
-router.post('/test-send',async(req,res)=>{try{
+router.post('/test-send', _owner, async(req,res)=>{try{
   const{channel,phone,email,message,subject}=req.body;
   const ch=(channel||'WHATSAPP').toUpperCase();
   if(ch==='EMAIL'&&!email)return res.status(400).json({error:'Email address required'});
@@ -221,28 +226,28 @@ router.post('/test-send',async(req,res)=>{try{
 }catch(e){res.status(500).json({error:e.message});}});
 
 // AI: Generate product description
-router.post('/generate-description',async(req,res)=>{try{
+router.post('/generate-description', _owner, async(req,res)=>{try{
   const{product_name,category,language}=req.body;
   const desc=await chatbot.generateProductDescription(product_name||'Product',category,language||'ar');
   res.json({description:desc||'Could not generate description. Please try again.'});
 }catch(e){res.status(500).json({error:e.message});}});
 
 // AI: Generate cart recovery message
-router.post('/generate-recovery',async(req,res)=>{try{
+router.post('/generate-recovery', _owner, async(req,res)=>{try{
   const{store_name,items,language}=req.body;
   const msg=await chatbot.generateCartRecoveryMessage(store_name||'Store',items||['Product'],language||'ar');
   res.json({message:msg||'You left items in your cart! Complete your order now.'});
 }catch(e){res.status(500).json({error:e.message});}});
 
 // AI: Moderate a review
-router.post('/moderate-review',async(req,res)=>{try{
+router.post('/moderate-review', _owner, async(req,res)=>{try{
   const{content,rating}=req.body;
   const result=await chatbot.moderateReview(content||'',rating||5);
   res.json(result);
 }catch(e){res.status(500).json({error:e.message});}});
 
 // AI: Generate product description (multi-language)
-router.post('/generate-description-multi',async(req,res)=>{try{
+router.post('/generate-description-multi', _owner, async(req,res)=>{try{
   const{product_name,category}=req.body;
   const[en,fr,ar]=await Promise.all([
     chatbot.generateProductDescription(product_name||'Product',category,'en'),
@@ -288,7 +293,7 @@ router.get('/whatsapp-qr/debug', async (req, res) => {
   res.json({ mode: 'built-in', info: 'WhatsApp Baileys runs directly in this backend — no Railway needed.' });
 });
 
-router.post('/whatsapp-qr/start', async (req, res) => {
+router.post('/whatsapp-qr/start', _ownerStore, async (req, res) => {
   try {
     const { storeId } = req.body;
     if (!storeId) return res.status(400).json({ error: 'storeId required' });
@@ -302,14 +307,14 @@ router.post('/whatsapp-qr/start', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.get('/whatsapp-qr/status/:storeId', (req, res) => {
+router.get('/whatsapp-qr/status/:storeId', _owner, (req, res) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.set('Pragma', 'no-cache');
   res.set('Expires', '0');
   res.json(waBaileys.getStatus(req.params.storeId));
 });
 
-router.post('/whatsapp-qr/disconnect', async (req, res) => {
+router.post('/whatsapp-qr/disconnect', _ownerStore, async (req, res) => {
   try {
     const { storeId } = req.body;
     await waBaileys.disconnectSession(storeId);
@@ -317,7 +322,7 @@ router.post('/whatsapp-qr/disconnect', async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-router.post('/whatsapp-qr/send', async (req, res) => {
+router.post('/whatsapp-qr/send', _ownerStore, async (req, res) => {
   try {
     const { storeId, phone, message } = req.body;
     if (!storeId || !phone) return res.status(400).json({ error: 'storeId and phone required' });
@@ -363,7 +368,7 @@ router.get('/wa/:storeId/stats', _waAuth(['store_owner', 'store_staff']), async 
   } catch (e) { res.json({ sent_today: 0, delivered: 0, failed: 0, success_rate: 100 }); }
 });
 
-router.get('/whatsapp-qr/log/:storeId', async (req, res) => {
+router.get('/whatsapp-qr/log/:storeId', _owner, async (req, res) => {
   try {
     const r = await pool.query('SELECT * FROM message_log WHERE store_id=$1 ORDER BY created_at DESC LIMIT 50', [req.params.storeId]);
     const total = await pool.query("SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status='sent') as sent, COUNT(*) FILTER (WHERE status='failed') as failed FROM message_log WHERE store_id=$1", [req.params.storeId]);
@@ -378,7 +383,7 @@ router.get('/whatsapp-qr/log/:storeId', async (req, res) => {
 // is accepted (HTTP 200 / known good response). Works for FB / TikTok / GA4 /
 // Snapchat / Google Sheets webhooks.
 // ─────────────────────────────────────────────────────────────────────────────
-router.post('/pixels/verify', async (req, res) => {
+router.post('/pixels/verify', _owner, async (req, res) => {
   const { type, value } = req.body || {};
   const v = String(value || '').trim();
   if (!type || !v) return res.status(400).json({ ok: false, reason: 'Missing type or value' });
@@ -523,7 +528,7 @@ router.get('/email/status', async (req, res) => {
 });
 
 // ═══ AI LANDING PAGE GENERATOR ═══
-router.post('/generate-landing', async (req, res) => {
+router.post('/generate-landing', _owner, async (req, res) => {
   try {
     const { products, store, language } = req.body;
     if (!products || !products.length) return res.status(400).json({ error: 'Products are required' });
@@ -540,7 +545,7 @@ router.post('/generate-landing', async (req, res) => {
 });
 
 // ═══ FULL AI LANDING PAGE — complete bespoke HTML, no templates ═══
-router.post('/generate-landing-html', async (req, res) => {
+router.post('/generate-landing-html', _owner, async (req, res) => {
   try {
     const { products, store, language, regenerate, nonce } = req.body;
     if (!products || !products.length) return res.status(400).json({ error: 'Products are required' });
@@ -591,7 +596,7 @@ router.post('/translate', async (req, res) => {
   }
 });
 
-router.post('/generate-image', async (req, res) => {
+router.post('/generate-image', _owner, async (req, res) => {
   try {
     const { prompt, size } = req.body || {};
     if (!prompt || !String(prompt).trim()) return res.status(400).json({ error: 'prompt is required' });
@@ -605,7 +610,7 @@ router.post('/generate-image', async (req, res) => {
   }
 });
 
-router.post('/email/:storeId/send-test', async (req, res) => {
+router.post('/email/:storeId/send-test', _owner, async (req, res) => {
   try {
     const { to, subject, html, text } = req.body || {};
     if (!to || !subject) return res.status(400).json({ error: 'to and subject are required' });

@@ -478,7 +478,10 @@ router.post('/stores',authMiddleware(['store_owner']),async(req,res)=>{try{
   }catch(quotaErr){console.log('[stores] quota check skipped:',quotaErr.message);}
   const{name,description,slug:userSlug}=req.body;if(!name)return res.status(400).json({error:'Store name is required'});let slug=userSlug?userSlug.toLowerCase().replace(/[^a-z0-9-]/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,''):slugify(name,{lower:true,strict:true});if(slug.length<3)return res.status(400).json({error:'Store URL must be at least 3 characters'});const reserved=['admin','login','register','dashboard','api','s','store','checkout','auth','profile','health'];if(reserved.includes(slug))return res.status(400).json({error:'This URL is reserved, please choose another'});const dup=await pool.query('SELECT id FROM stores WHERE slug=$1',[slug]);if(dup.rows.length)return res.status(409).json({error:'This store URL is already taken. Try a different one.'});const r=await pool.query('INSERT INTO stores(owner_id,store_name,slug,description,is_published,is_active) VALUES($1,$2,$3,$4,TRUE,TRUE) RETURNING *',[req.user.id,name,slug,description||null]);try{await pool.query('INSERT INTO payment_settings(store_id,cod_enabled) VALUES($1,TRUE)',[r.rows[0].id]);}catch(e){}res.status(201).json(await loadStore(r.rows[0].id));}catch(e){res.status(500).json({error:e.message});}});
 
-router.get('/stores',authMiddleware(['store_owner']),async(req,res)=>{try{const r=await pool.query(`SELECT s.*,(SELECT COUNT(*) FROM products WHERE store_id=s.id) as product_count,(SELECT COUNT(*) FROM orders WHERE store_id=s.id) as order_count FROM stores s WHERE s.owner_id=$1 ORDER BY s.created_at DESC`,[req.user.id]);const out=[];for(const s of r.rows){let pay={};try{pay=(await pool.query('SELECT * FROM payment_settings WHERE store_id=$1',[s.id])).rows[0]||{};}catch(e){}const cfg=s.config||{};
+router.get('/stores',authMiddleware(['store_owner']),async(req,res)=>{try{
+  // Staff only get the stores they are assigned to (not all the owner's stores).
+  let _onlyIds=null;if(req.user.staff_id){const{staffStoreIds}=require('../middleware/staffAccess');_onlyIds=await staffStoreIds(req.user.staff_id,req.user.id);}
+  const r=await pool.query(`SELECT s.*,(SELECT COUNT(*) FROM products WHERE store_id=s.id) as product_count,(SELECT COUNT(*) FROM orders WHERE store_id=s.id) as order_count FROM stores s WHERE s.owner_id=$1 ${_onlyIds?'AND s.id::text = ANY($2::text[])':''} ORDER BY s.created_at DESC`,_onlyIds?[req.user.id,_onlyIds]:[req.user.id]);const out=[];for(const s of r.rows){let pay={};try{pay=(await pool.query('SELECT * FROM payment_settings WHERE store_id=$1',[s.id])).rows[0]||{};}catch(e){}const cfg=s.config||{};
     // Strip OVERSIZED ai_html (legacy heavy GPT pages) from the list so the
     // dashboard never has to download/parse multi-MB blobs (which froze the
     // builder). Light pages keep their ai_html so they stay editable inline.
@@ -516,6 +519,30 @@ router.get('/stores/:sid',authMiddleware(['store_owner']),async(req,res)=>{try{
   res.json(await loadStore(sid));
 }catch(e){res.status(500).json({error:e.message});}});
 
+// Staff only receive the dashboard figures their permissions cover: no
+// order figures without orders_view, no money without finances_view, etc.
+// `hidden` tells the dashboard which cards to leave out.
+function limitDashboardForStaff(perms,d){
+  if(!perms)return d;
+  const has=k=>perms.has(k);const hidden=[];
+  const st={...d.stats};let out={...d,stats:st};
+  if(!has('orders_view')){hidden.push('orders');delete st.totalOrders;out.statusCounts={};out.recentOrders=[];if(out.trend)out.trend={...out.trend,orders:undefined};}
+  if(!has('finances_view')){hidden.push('revenue');delete st.totalRevenue;delete st.avgOrderValue;if(out.trend)out.trend={...out.trend,revenue:undefined,avgOrderValue:undefined};out.recentOrders=(out.recentOrders||[]).map(o=>({...o,total:undefined,subtotal:undefined,shipping_cost:undefined}));}
+  if(!has('orders_view')&&!has('finances_view'))out.salesData=[];
+  else if(!has('finances_view'))out.salesData=(out.salesData||[]).map(x=>({...x,revenue:undefined,sales:undefined,total:undefined}));
+  else if(!has('orders_view'))out.salesData=(out.salesData||[]).map(x=>({...x,orders:undefined}));
+  if(!has('products_view'))hidden.push('products'),delete st.totalProducts;
+  if(!has('customers_view'))hidden.push('customers'),delete st.totalCustomers;
+  if(!has('analytics_view')&&!has('dashboard_view'))hidden.push('visits'),delete st.storeVisits;
+  out.hidden=hidden;out.staff_permissions=[...perms];
+  return out;
+}
+// What the logged-in person may do in this store — the dashboard calls this
+// on load so staff always work with their current permissions.
+router.get('/stores/:sid/my-access',authMiddleware(['store_owner']),async(req,res)=>{
+  if(!req.staffPerms)return res.json({is_staff:false,permissions:null});
+  res.json({is_staff:true,permissions:[...req.staffPerms]});
+});
 router.get('/stores/:sid/dashboard',authMiddleware(['store_owner']),async(req,res)=>{try{const sid=req.params.sid;const store=await pool.query('SELECT * FROM stores WHERE id=$1 AND owner_id=$2',[sid,req.user.id]);if(!store.rows.length)return res.status(404).json({error:'Not found'});const full=await loadStore(sid);
 // Every figure uses the same definition of an order: not deleted, and not an
 // online-payment order still waiting for its receipt (those are hidden from
@@ -560,7 +587,7 @@ try{
   };
 }catch(e){}
 let itemsByOrder={};try{const ids=ro.map(o=>o.id);if(ids.length){const ir=await pool.query("SELECT oi.order_id,oi.product_id,oi.product_name,oi.product_image,oi.quantity,oi.unit_price,oi.total_price,p.images AS p_images FROM order_items oi LEFT JOIN products p ON p.id=oi.product_id WHERE oi.order_id=ANY($1::uuid[])",[ids]);for(const it of ir.rows){let img=it.product_image||null;if(!img){try{const imgs=Array.isArray(it.p_images)?it.p_images:(typeof it.p_images==='string'?JSON.parse(it.p_images||'[]'):[]);img=imgs[0]||null;}catch(e){}}(itemsByOrder[it.order_id]=itemsByOrder[it.order_id]||[]).push({product_id:it.product_id,product_name:it.product_name,quantity:it.quantity,price:it.unit_price,total_price:it.total_price,image:img});}}}catch(e){console.error('[dashboard items]',e.message);}
-res.json({store:full,stats:{totalOrders:to,totalRevenue:tr,avgOrderValue:kept?Math.round(tr/kept):0,totalProducts:tp,totalCustomers:tc,storeVisits:visits},statusCounts,trend,recentOrders:ro.map(o=>{let _c=full.config||{};if(typeof _c==='string'){try{_c=JSON.parse(_c);}catch{_c={};}}return{...o,order_number:formatOrderNumber(o.order_number,_c),items:itemsByOrder[o.id]||[],first_image:(itemsByOrder[o.id]||[]).find(i=>i.image)?.image||null};}),salesData:sd});}catch(e){res.status(500).json({error:e.message});}});
+res.json(limitDashboardForStaff(req.staffPerms,{store:full,stats:{totalOrders:to,totalRevenue:tr,avgOrderValue:kept?Math.round(tr/kept):0,totalProducts:tp,totalCustomers:tc,storeVisits:visits},statusCounts,trend,recentOrders:ro.map(o=>{let _c=full.config||{};if(typeof _c==='string'){try{_c=JSON.parse(_c);}catch{_c={};}}return{...o,order_number:formatOrderNumber(o.order_number,_c),items:itemsByOrder[o.id]||[],first_image:(itemsByOrder[o.id]||[]).find(i=>i.image)?.image||null};}),salesData:sd}));}catch(e){res.status(500).json({error:e.message});}});
 
 // ANALYTICS — everything the Analytics page charts, computed over ALL of the
 // store's orders in the chosen range. The page used to derive its pie chart
@@ -883,7 +910,7 @@ router.delete('/stores/:sid/role-templates/:tid',authMiddleware(['store_owner'])
   }catch(e){res.status(500).json({error:e.message});}
 });
 // ---- Update a specific staff member's role/permissions (per-user override) ----
-router.patch('/stores/:sid/staff/:uid',authMiddleware(['store_owner']),async(req,res)=>{
+router.patch('/stores/:sid/staff/:uid',authMiddleware(['store_owner']),async(req,res)=>{require('../middleware/staffAccess').forgetStaff();
   try{
     if(req.user.staff_id)return res.status(403).json({error:'Staff cannot manage other staff'});
     const{name,email,phone,password,role,permissions,role_template_id,is_active,avatar}=req.body||{};
@@ -967,7 +994,7 @@ router.patch('/stores/:sid/staff/:uid',authMiddleware(['store_owner']),async(req
     res.json({staff:updatedRow});
   }catch(e){console.error('[staff patch]',e);res.status(500).json({error:e.message||'Failed'});}
 });
-router.delete('/stores/:sid/staff/:uid',authMiddleware(['store_owner']),async(req,res)=>{
+router.delete('/stores/:sid/staff/:uid',authMiddleware(['store_owner']),async(req,res)=>{require('../middleware/staffAccess').forgetStaff();
   try{
     // Find the staff first so we can also remove their sibling rows in the
     // owner's other stores (multi-store assignment), keeping the list clean.

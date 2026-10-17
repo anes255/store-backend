@@ -161,6 +161,8 @@ router.patch('/receipt/:rid/review',authMiddleware(['store_owner','store_staff']
   const receipt=await pool.query('SELECT * FROM payment_receipts WHERE id=$1',[req.params.rid]);
   if(!receipt.rows.length)return res.status(404).json({error:'Not found'});
   const r=receipt.rows[0];
+  // The receipt's store must belong to the caller (staff: and they may edit orders).
+  {const{checkAccess}=require('../middleware/staffAccess');req.params.sid=r.store_id;req.route={path:'/stores/:sid/orders/:oid/payment'};const deny=await checkAccess(req);if(deny)return res.status(deny.status).json({error:deny.error});}
 
   await pool.query('UPDATE payment_receipts SET status=$1,notes=$2,reviewed_by=$3,reviewed_at=NOW() WHERE id=$4',
     [status,notes||null,req.user.id,req.params.rid]);
