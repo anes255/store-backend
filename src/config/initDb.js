@@ -480,6 +480,9 @@ const initDb=async()=>{
     // column was never created, so every visit was dropped and Analytics
     // showed 0 visits / 0% conversion.
     try{await pool.query("ALTER TABLE stores ADD COLUMN IF NOT EXISTS total_visits INT DEFAULT 0");}catch(e){}
+    // Store deletion cooldown: set when the owner schedules deletion, cleared on
+    // cancel; services/storePurge.js removes the store once it has passed.
+    try{await pool.query("ALTER TABLE stores ADD COLUMN IF NOT EXISTS deletion_scheduled_at TIMESTAMPTZ");}catch(e){}
     // Order in which the store's delivery companies are listed at checkout.
     try{await pool.query("ALTER TABLE delivery_companies ADD COLUMN IF NOT EXISTS sort_order INT");}catch(e){}
     // One-off cleanup: hide the empty orders earlier carrier syncs created.

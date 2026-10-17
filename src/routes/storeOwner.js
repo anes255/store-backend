@@ -485,32 +485,28 @@ router.get('/stores',authMiddleware(['store_owner']),async(req,res)=>{try{const 
     if(Array.isArray(cfg.landing_pages))cfg.landing_pages=cfg.landing_pages.map(lp=>{if(lp&&typeof lp.ai_html==='string'&&lp.ai_html.length>900000){const{ai_html,...rest}=lp;return{...rest,ai_html:'',has_ai_html:true,too_large:true};}return lp;});
     out.push({...cfg,...s,name:s.store_name,is_live:s.is_published,logo:s.logo_url,favicon:s.favicon_url,hero_title:s.hero_title,hero_subtitle:s.hero_subtitle,product_count:s.product_count,order_count:s.order_count,enable_cod:pay.cod_enabled,enable_ccp:pay.ccp_enabled,ccp_account:pay.ccp_account,ccp_name:pay.ccp_name,enable_baridimob:pay.baridimob_enabled,baridimob_rip:pay.baridimob_rip,enable_bank_transfer:pay.bank_transfer_enabled,bank_name:pay.bank_name,bank_account:pay.bank_account,bank_rib:pay.bank_rib});}res.json(out);}catch(e){res.status(500).json({error:e.message});}});
 
-// Delete a store permanently (owner only). The client must echo the store's
-// exact name, so a stray click can never wipe a shop. Every per-store table is
-// cleared inside one transaction; each delete runs under a savepoint so a table
-// that does not exist on this database cannot abort the whole operation.
-router.delete('/stores/:sid',authMiddleware(['store_owner']),async(req,res)=>{
-  const client=await pool.connect();
-  try{
-    const sid=req.params.sid;
-    const st=(await client.query('SELECT id,store_name FROM stores WHERE id=$1 AND owner_id=$2',[sid,req.user.id])).rows[0];
-    if(!st)return res.status(404).json({error:'Store not found'});
-    const typed=String(req.body?.confirm_name||'').trim();
-    if(!typed||typed!==String(st.store_name||'').trim())return res.status(400).json({error:'Type the store name exactly to confirm deletion'});
-    await client.query('BEGIN');
-    const del=async(sql,params)=>{await client.query('SAVEPOINT sp');try{await client.query(sql,params);await client.query('RELEASE SAVEPOINT sp');}catch{await client.query('ROLLBACK TO SAVEPOINT sp');}};
-    for(const t of ['payment_receipts','blacklist','message_log','expenses','store_pages','notifications','push_subscriptions','reviews','carts','store_domains','shipping_wilayas','delivery_companies','categories','customers','store_status_templates','coupons','store_staff','activity_log']){
-      await del(`DELETE FROM ${t} WHERE store_id=$1`,[sid]);
-    }
-    await del('DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE store_id=$1)',[sid]);
-    await del('DELETE FROM orders WHERE store_id=$1',[sid]);
-    await del('DELETE FROM products WHERE store_id=$1',[sid]);
-    await client.query('DELETE FROM stores WHERE id=$1 AND owner_id=$2',[sid,req.user.id]);
-    await client.query('COMMIT');
-    res.json({ok:true});
-  }catch(e){try{await client.query('ROLLBACK');}catch{}res.status(500).json({error:e.message});}
-  finally{client.release();}
-});
+// Schedule a store for deletion (owner only). The client must echo the store's
+// exact name, so a stray click can never wipe a shop. Nothing is removed now:
+// the store is purged COOLDOWN_DAYS later by the runStorePurge job, and the
+// owner can cancel until then. Re-scheduling keeps the original date.
+router.delete('/stores/:sid',authMiddleware(['store_owner']),async(req,res)=>{try{
+  const sid=req.params.sid;
+  const st=(await pool.query('SELECT id,store_name FROM stores WHERE id=$1 AND owner_id=$2',[sid,req.user.id])).rows[0];
+  if(!st)return res.status(404).json({error:'Store not found'});
+  const typed=String(req.body?.confirm_name||'').trim();
+  if(!typed||typed!==String(st.store_name||'').trim())return res.status(400).json({error:'Type the store name exactly to confirm deletion'});
+  const{COOLDOWN_DAYS}=require('../services/storePurge');
+  const r=await pool.query(`UPDATE stores SET deletion_scheduled_at=COALESCE(deletion_scheduled_at,NOW()+make_interval(days=>$3)) WHERE id=$1 AND owner_id=$2 RETURNING deletion_scheduled_at`,[sid,req.user.id,COOLDOWN_DAYS]);
+  try{await pool.query("INSERT INTO notifications(store_id,type,title,message,link) VALUES($1,'store_deletion',$2,$3,'/dashboard/settings')",[sid,'Store scheduled for deletion',`This store will be permanently deleted in ${COOLDOWN_DAYS} days unless you cancel.`]);}catch{}
+  res.json({ok:true,deletion_scheduled_at:r.rows[0].deletion_scheduled_at,cooldown_days:COOLDOWN_DAYS});
+}catch(e){res.status(500).json({error:e.message});}});
+
+// Cancel a scheduled store deletion.
+router.post('/stores/:sid/cancel-deletion',authMiddleware(['store_owner']),async(req,res)=>{try{
+  const r=await pool.query('UPDATE stores SET deletion_scheduled_at=NULL WHERE id=$1 AND owner_id=$2 RETURNING id',[req.params.sid,req.user.id]);
+  if(!r.rows.length)return res.status(404).json({error:'Store not found'});
+  res.json({ok:true,deletion_scheduled_at:null});
+}catch(e){res.status(500).json({error:e.message});}});
 
 // Single store fetch (full data including payment settings)
 router.get('/stores/:sid',authMiddleware(['store_owner']),async(req,res)=>{try{
@@ -703,7 +699,7 @@ router.put('/stores/:sid',authMiddleware(['store_owner']),async(req,res)=>{try{
   
   // 3. Save ALL extra fields to config JSONB (theme, toggles, messages, etc.)
   const extraFields={};
-  const skipKeys=new Set([...Object.keys(FIELD_MAP),...Object.keys(PAY_MAP),'id','owner_id','slug','created_at','updated_at','config','product_count','order_count','revenue','store_visits','total_visits','is_active']);
+  const skipKeys=new Set([...Object.keys(FIELD_MAP),...Object.keys(PAY_MAP),'id','owner_id','slug','created_at','updated_at','config','product_count','order_count','revenue','store_visits','total_visits','is_active','deletion_scheduled_at']);
   for(const[key,val]of Object.entries(f)){if(!skipKeys.has(key))extraFields[key]=val;}
   // Merge with existing config
   const existing=await pool.query('SELECT config FROM stores WHERE id=$1',[sid]);
