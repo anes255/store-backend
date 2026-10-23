@@ -33,7 +33,8 @@ const ALIASES = {
   view_products: ['products_view'], manage_products: ['products_view', 'products_edit', 'stock_manage'],
   view_customers: ['customers_view'], manage_customers: ['customers_view', 'customers_edit'],
   view_analytics: ['analytics_view', 'dashboard_view'], manage_settings: ['settings_view', 'settings_edit'],
-  manage_staff: ['staff_manage'], confirm_orders: ['orders_confirm'], prepare_orders: ['orders_prepare'],
+  manage_staff: ['staff_manage', 'workers_view', 'workers_manage'], confirm_orders: ['orders_confirm'], prepare_orders: ['orders_prepare'],
+  staff_manage: ['workers_view', 'workers_manage'], workers_manage: ['workers_view'], payroll_manage: ['payroll_view', 'payroll_pay'], payroll_pay: ['payroll_view'],
 };
 function normalizePerms(raw) {
   let p = raw;
@@ -51,9 +52,20 @@ const ownsStore = (ownerId, sid) => cached(`own:${ownerId}:${sid}`, async () => 
 
 // The staff member's own row (by staff_id) — used to know who they are.
 const staffRow = (staffId) => cached(`staff:${staffId}`, async () => {
-  const r = await pool.query('SELECT id,store_id,email,phone,is_active,permissions FROM store_staff WHERE id=$1', [staffId]);
+  let r;
+  try { r = await pool.query('SELECT id,store_id,email,phone,username,is_active,permissions,status,session_version FROM store_staff WHERE id=$1', [staffId]); }
+  catch { r = await pool.query('SELECT id,store_id,email,phone,is_active,permissions FROM store_staff WHERE id=$1', [staffId]); }
   return r.rows[0] || null;
 });
+
+// "Last seen" for the Workers page (written at most once a minute per worker).
+const seen = new Map();
+function touchSeen(staffId) {
+  const now = Date.now();
+  if ((seen.get(staffId) || 0) > now - 60000) return;
+  seen.set(staffId, now);
+  pool.query('UPDATE store_staff SET last_seen_at=NOW() WHERE id=$1', [staffId]).catch(() => {});
+}
 
 // The staff member's row for a given store: the same person can be on
 // several of the owner's stores (one row per store, matched by email/phone).
@@ -63,6 +75,7 @@ const staffRowForStore = (staffId, sid) => cached(`staff:${staffId}:${sid}`, asy
   if (String(me.store_id) === String(sid)) return me;
   let r = { rows: [] };
   if (me.email) r = await pool.query('SELECT id,store_id,is_active,permissions FROM store_staff WHERE store_id=$1 AND LOWER(email)=LOWER($2) LIMIT 1', [sid, me.email]);
+  if (!r.rows.length && me.username) r = await pool.query('SELECT id,store_id,is_active,permissions FROM store_staff WHERE store_id=$1 AND LOWER(username)=LOWER($2) LIMIT 1', [sid, me.username]).catch(() => ({ rows: [] }));
   if (!r.rows.length && me.phone) r = await pool.query('SELECT id,store_id,is_active,permissions FROM store_staff WHERE store_id=$1 AND phone=$2 LIMIT 1', [sid, me.phone]);
   return r.rows[0] || null;
 });
@@ -101,12 +114,24 @@ const RULES = [
   ['GET', /^\/stores\/:sid\/apps$/, ['apps_view', 'settings_view']],
   ['POST', /^\/stores\/:sid\/apps\/install$/, ['settings_edit']],
   // orders
-  ['GET', /^\/stores\/:sid\/orders(\/:oid)?$/, ['orders_view']],
+  ['GET', /^\/stores\/:sid\/orders(\/:oid)?$/, ['orders_view', 'orders_view_assigned']],
   ['GET', /^\/stores\/:sid\/orders-export$/, ['orders_view']],
   ['GET', /^\/stores\/:sid\/abandoned-carts$/, ['abandoned_view', 'orders_view']],
   ['GET', /^\/stores\/:sid\/orders\/:oid\/email-debug$/, ['orders_edit']],
   ['POST', /^\/stores\/:sid\/orders$/, ['orders_edit']],
   ['PATCH', /^\/stores\/:sid\/orders\/:oid\/status$/, ['orders_edit', 'orders_confirm', 'orders_prepare']],
+  // workers & payroll (routes/workers.js)
+  ['GET', /^\/stores\/:sid\/me$/, ANY],
+  ['POST', /^\/stores\/:sid\/orders\/:oid\/log-action$/, ANY],
+  ['GET', /^\/stores\/:sid\/orders\/:oid\/timeline$/, ['orders_view', 'orders_view_assigned']],
+  ['POST', /^\/stores\/:sid\/orders\/assign$/, ['orders_assign']],
+  ['GET', /^\/stores\/:sid\/(workers(\/:wid)?|job-types|worker-roles)$/, ['workers_view', 'workers_manage', 'staff_manage']],
+  ['PUT', /^\/stores\/:sid\/workers\/:wid\/compensation$/, ['workers_manage', 'staff_manage', 'payroll_manage']],
+  ['*', /^\/stores\/:sid\/(workers|job-types|worker-roles)/, ['workers_manage', 'staff_manage']],
+  ['GET', /^\/stores\/:sid\/(performance|worker-activity)$/, ['workers_view', 'workers_manage', 'staff_manage']],
+  ['GET', /^\/stores\/:sid\/payroll/, ['payroll_view', 'payroll_manage', 'payroll_pay']],
+  ['POST', /^\/stores\/:sid\/payroll\/items\/:iid\/pay$/, ['payroll_pay', 'payroll_manage']],
+  ['*', /^\/stores\/:sid\/payroll/, ['payroll_manage']],
   ['POST', /^\/stores\/:sid\/orders\/:oid\/dispatch$/, ['orders_edit', 'orders_prepare']],
   ['PATCH', /^\/stores\/:sid\/orders\/:oid(\/(payment|tracking|archive|restore))?$/, ['orders_edit']],
   ['PATCH', /^\/stores\/:sid\/orders\/bulk-archive$/, ['orders_edit']],
@@ -173,7 +198,11 @@ async function checkAccess(req, opts = {}) {
   // Staff: their account must still exist and be active.
   if (isStaffToken) {
     const me = await staffRow(staffId);
-    if (!me || me.is_active === false) return { status: 401, error: 'Your staff account has been disabled. Contact your store admin.', code: 'STAFF_DISABLED' };
+    if (!me || me.is_active === false || ['inactive', 'suspended', 'pending'].includes(me.status)) return { status: 401, error: 'Your staff account has been disabled. Contact your store admin.', code: 'STAFF_DISABLED' };
+    // Password change, reset or "log out everywhere" bump session_version:
+    // tokens issued before that stop working.
+    if (me.session_version != null && (parseInt(u.sv) || 0) !== (parseInt(me.session_version) || 0)) return { status: 401, error: 'Your session has ended. Please log in again.', code: 'STAFF_DISABLED' };
+    touchSeen(staffId);
     for (const [m, re] of OWNER_ACCOUNT) if (m === method && re.test(path)) return { status: 403, error: 'Only the store owner can do this.' };
   }
 
@@ -197,6 +226,7 @@ async function checkAccess(req, opts = {}) {
   if (!row || row.is_active === false) return { status: 403, error: 'You are not a member of this store.' };
   const perms = normalizePerms(row.permissions);
   req.staffPerms = perms;
+  req.staffRowId = row.id;
   const rule = ruleFor(method, path);
   if (!rule) return { status: 403, error: 'Your role does not allow this action.' };
   if (rule.perms === OWNER) return { status: 403, error: 'Only the store owner can do this.' };

@@ -552,6 +552,9 @@ const initDb=async()=>{
       created_at TIMESTAMPTZ DEFAULT NOW()
     )`);console.log('✅ store_domains ready');}catch(e){console.log('store_domains:',e.message);}
 
+    // ═══ Workers & payroll ═══
+    try{await require('./workersSchema').ensureWorkersSchema();console.log('✅ workers & payroll ready');}catch(e){console.log('workers schema:',e.message);}
+
     console.log('✅ DB init complete');
   }catch(e){console.error('DB init error:',e.message);}
 };

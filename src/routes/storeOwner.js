@@ -305,7 +305,7 @@ router.post('/login',async(req,res)=>{try{
       if(!sr.rows.length)sr=await pool.query('SELECT * FROM store_staff WHERE phone=$1',[idTrim]);
       if(sr.rows.length){
         const staff=sr.rows[0];
-        if(staff.is_active===false)return res.status(403).json({error:'This staff account is deactivated. Contact your store admin.'});
+        if(staff.is_active===false||['inactive','suspended','pending'].includes(staff.status))return res.status(403).json({error:staff.status==='pending'?'Finish setting your password from your invitation link first.':'This staff account is deactivated. Contact your store admin.'});
         if(await bcrypt.compare(password,staff.password_hash)){
           const sRow=(await pool.query('SELECT * FROM stores WHERE id=$1',[staff.store_id])).rows[0];
           if(!sRow)return res.status(401).json({error:'Assigned store no longer exists'});
@@ -316,8 +316,8 @@ router.post('/login',async(req,res)=>{try{
           const staffRoleLabel=await resolveStaffRoleLabel(staff.role,sRow.id);
           console.log('[Owner Login] ✅ STAFF (no-owner path):',staff.name,'stores:',sibling.length);
           return res.json({
-            token:generateToken({id:owner.id,role:'store_owner',name:staff.name,staff_id:staff.id,staff_role:staff.role,staff_role_label:staffRoleLabel,permissions:perms,scoped_store_id:sRow.id,scoped_store_ids:sibling.map(s=>s.id)}),
-            owner:{id:owner.id,name:staff.name,email:staff.email,phone:staff.phone,subscription_plan:owner.subscription_plan,is_staff:true,staff_id:staff.id,staff_role:staff.role,staff_role_label:staffRoleLabel,permissions:perms,scoped_store_id:sRow.id,scoped_store_ids:sibling.map(s=>s.id)},
+            token:generateToken({id:owner.id,role:'store_owner',name:staff.name,staff_id:staff.id,staff_role:staff.role,staff_role_label:staffRoleLabel,permissions:perms,scoped_store_id:sRow.id,scoped_store_ids:sibling.map(s=>s.id),sv:staff.session_version||0}),
+            owner:{id:owner.id,name:staff.name,email:staff.email,phone:staff.phone,subscription_plan:owner.subscription_plan,is_staff:true,staff_id:staff.id,staff_role:staff.role,staff_role_label:staffRoleLabel,permissions:perms,scoped_store_id:sRow.id,scoped_store_ids:sibling.map(s=>s.id),sv:staff.session_version||0},
             stores:sibling.map(s=>({...(s.config||{}),...s,name:s.store_name,is_live:s.is_published,logo:s.logo_url,hero_title:s.hero_title,hero_subtitle:s.hero_subtitle}))
           });
         }
@@ -338,7 +338,7 @@ router.post('/login',async(req,res)=>{try{
       if(!sr.rows.length)sr=await pool.query('SELECT * FROM store_staff WHERE phone=$1',[idTrim]);
       if(sr.rows.length){
         const staff=sr.rows[0];
-        if(staff.is_active===false)return res.status(403).json({error:'This staff account is deactivated. Contact your store admin.'});
+        if(staff.is_active===false||['inactive','suspended','pending'].includes(staff.status))return res.status(403).json({error:staff.status==='pending'?'Finish setting your password from your invitation link first.':'This staff account is deactivated. Contact your store admin.'});
         if(await bcrypt.compare(password,staff.password_hash)){
           const sRow=(await pool.query('SELECT * FROM stores WHERE id=$1',[staff.store_id])).rows[0];
           if(!sRow)return res.status(401).json({error:'Assigned store no longer exists'});
@@ -349,8 +349,8 @@ router.post('/login',async(req,res)=>{try{
           const staffRoleLabel=await resolveStaffRoleLabel(staff.role,sRow.id);
           console.log('[Owner Login] ✅ STAFF:',staff.name,'stores:',sibling.length,'primary:',sRow.slug);
           return res.json({
-            token:generateToken({id:owner.id,role:'store_owner',name:staff.name,staff_id:staff.id,staff_role:staff.role,staff_role_label:staffRoleLabel,permissions:perms,scoped_store_id:sRow.id,scoped_store_ids:sibling.map(s=>s.id)}),
-            owner:{id:owner.id,name:staff.name,email:staff.email,phone:staff.phone,subscription_plan:owner.subscription_plan,is_staff:true,staff_id:staff.id,staff_role:staff.role,staff_role_label:staffRoleLabel,permissions:perms,scoped_store_id:sRow.id,scoped_store_ids:sibling.map(s=>s.id)},
+            token:generateToken({id:owner.id,role:'store_owner',name:staff.name,staff_id:staff.id,staff_role:staff.role,staff_role_label:staffRoleLabel,permissions:perms,scoped_store_id:sRow.id,scoped_store_ids:sibling.map(s=>s.id),sv:staff.session_version||0}),
+            owner:{id:owner.id,name:staff.name,email:staff.email,phone:staff.phone,subscription_plan:owner.subscription_plan,is_staff:true,staff_id:staff.id,staff_role:staff.role,staff_role_label:staffRoleLabel,permissions:perms,scoped_store_id:sRow.id,scoped_store_ids:sibling.map(s=>s.id),sv:staff.session_version||0},
             stores:sibling.map(s=>({...(s.config||{}),...s,name:s.store_name,is_live:s.is_published,logo:s.logo_url,hero_title:s.hero_title,hero_subtitle:s.hero_subtitle}))
           });
         }
@@ -1011,7 +1011,7 @@ router.delete('/stores/:sid/staff/:uid',authMiddleware(['store_owner']),async(re
   }catch(e){res.status(500).json({error:e.message});}
 });
 
-router.post('/staff/login',async(req,res)=>{try{const{storeSlug,email,password}=req.body;const store=await pool.query('SELECT id FROM stores WHERE slug=$1',[storeSlug]);if(!store.rows.length)return res.status(404).json({error:'Not found'});const staff=await pool.query('SELECT * FROM store_staff WHERE store_id=$1 AND email=$2 AND is_active=TRUE',[store.rows[0].id,email]);if(!staff.rows.length)return res.status(401).json({error:'Invalid'});if(!(await bcrypt.compare(password,staff.rows[0].password_hash)))return res.status(401).json({error:'Invalid'});res.json({token:generateToken({id:staff.rows[0].id,role:'store_staff',staffRole:staff.rows[0].role,storeId:store.rows[0].id,name:staff.rows[0].name}),staff:{id:staff.rows[0].id,name:staff.rows[0].name,role:staff.rows[0].role}});}catch(e){res.status(500).json({error:e.message});}});
+router.post('/staff/login',async(req,res)=>{try{const{storeSlug,email,password}=req.body;const store=await pool.query('SELECT id FROM stores WHERE slug=$1',[storeSlug]);if(!store.rows.length)return res.status(404).json({error:'Not found'});const staff=await pool.query('SELECT * FROM store_staff WHERE store_id=$1 AND email=$2 AND is_active=TRUE',[store.rows[0].id,email]);if(!staff.rows.length)return res.status(401).json({error:'Invalid'});if(!(await bcrypt.compare(password,staff.rows[0].password_hash)))return res.status(401).json({error:'Invalid'});res.json({token:generateToken({id:staff.rows[0].id,role:'store_staff',staffRole:staff.rows[0].role,storeId:store.rows[0].id,name:staff.rows[0].name,sv:staff.rows[0].session_version||0}),staff:{id:staff.rows[0].id,name:staff.rows[0].name,role:staff.rows[0].role}});}catch(e){res.status(500).json({error:e.message});}});
 
 router.get('/stores/:sid/domains',authMiddleware(['store_owner']),async(req,res)=>{try{res.json((await pool.query('SELECT * FROM store_domains WHERE store_id=$1 ORDER BY created_at DESC',[req.params.sid])).rows);}catch(e){res.json([]);}});
 router.post('/stores/:sid/domains',authMiddleware(['store_owner']),_lpf,_rf('custom_domain'),async(req,res)=>{try{const{domain_name}=req.body;if(!domain_name)return res.status(400).json({error:'Domain required'});const clean=domain_name.replace(/^https?:\/\//,'').replace(/\/.*$/,'').trim().toLowerCase();const dup=await pool.query('SELECT id FROM store_domains WHERE domain_name=$1',[clean]);if(dup.rows.length)return res.status(409).json({error:'This domain is already connected to a store'});
@@ -1320,7 +1320,7 @@ async function logActivity(storeId, req, action, targetType, targetId, details) 
     await ensureActivityTable();
     await pool.query(
       'INSERT INTO staff_activity_log(store_id, actor_id, actor_name, actor_role, action, target_type, target_id, details) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)',
-      [storeId, req.user?.id || null, req.user?.name || null, req.user?.staff_role || req.user?.role || null, action, targetType || null, targetId ? String(targetId) : null, details ? (typeof details === 'string' ? details : JSON.stringify(details)) : null]
+      [storeId, req.user?.staff_id || req.user?.id || null, req.user?.name || null, req.user?.staff_role_label || req.user?.staff_role || req.user?.role || null, action, targetType || null, targetId ? String(targetId) : null, details ? (typeof details === 'string' ? details : JSON.stringify(details)) : null]
     );
   } catch (e) { console.log('[activity log skip]', e.message); }
 }

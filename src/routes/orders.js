@@ -38,6 +38,12 @@ function ensureArchiveCol(){
 }
 ensureArchiveCol();
 
+// Staff limited to their assigned orders may only open / change those.
+async function assignedOnlyBlocked(req,orderId){
+  if(!req.staffPerms||req.staffPerms.has('orders_view'))return false;
+  try{const r=await pool.query('SELECT assigned_staff_id FROM orders WHERE id=$1 AND store_id=$2',[orderId,req.params.sid]);return !r.rows[0]||String(r.rows[0].assigned_staff_id)!==String(req.staffRowId);}catch{return true;}
+}
+
 // Orders
 router.get('/stores/:sid/orders',authMiddleware(['store_owner','store_staff']),async(req,res)=>{try{
   await ensureArchiveCol();
@@ -58,6 +64,8 @@ router.get('/stores/:sid/orders',authMiddleware(['store_owner','store_staff']),a
   // Hide pending-payment orders (CCP/BaridiMob without receipt yet) — they
   // appear only after the buyer uploads their receipt in the second step.
   q+=" AND (status IS NULL OR status<>'pending_payment')";
+  // Staff who may only see the orders assigned to them.
+  if(req.staffPerms&&!req.staffPerms.has('orders_view')){p.push(req.staffRowId);q+=` AND assigned_staff_id=$${p.length}`;}
   if(status&&status!=='all'){
     if(status==='preparing'){q+=` AND status IN ('preparing','under_preparation')`;}
     else{p.push(status);q+=` AND status=$${p.length}`;}
@@ -197,7 +205,7 @@ router.delete('/stores/:sid/orders/:oid/purge',authMiddleware(['store_owner']),a
 }catch(e){res.status(500).json({error:e.message});}});
 
 // Single order with items
-router.get('/stores/:sid/orders/:oid',authMiddleware(['store_owner','store_staff']),async(req,res)=>{try{const o=await pool.query('SELECT * FROM orders WHERE id=$1 AND store_id=$2',[req.params.oid,req.params.sid]);if(!o.rows.length)return res.status(404).json({error:'Not found'});const items=await pool.query('SELECT * FROM order_items WHERE order_id=$1',[req.params.oid]);const order=o.rows[0];let _cfg={};try{let _r=(await pool.query('SELECT config FROM stores WHERE id=$1',[req.params.sid])).rows[0]?.config||{};if(typeof _r==='string'){try{_r=JSON.parse(_r);}catch{_r={};}}_cfg=_r;}catch{}res.json({...order,order_number:formatOrderNumber(order.order_number,_cfg),discount_amount:order.discount,items:items.rows});}catch(e){res.status(500).json({error:e.message});}});
+router.get('/stores/:sid/orders/:oid',authMiddleware(['store_owner','store_staff']),async(req,res)=>{try{if(await assignedOnlyBlocked(req,req.params.oid))return res.status(403).json({error:'This order is not assigned to you.'});const o=await pool.query('SELECT * FROM orders WHERE id=$1 AND store_id=$2',[req.params.oid,req.params.sid]);if(!o.rows.length)return res.status(404).json({error:'Not found'});const items=await pool.query('SELECT * FROM order_items WHERE order_id=$1',[req.params.oid]);const order=o.rows[0];let _cfg={};try{let _r=(await pool.query('SELECT config FROM stores WHERE id=$1',[req.params.sid])).rows[0]?.config||{};if(typeof _r==='string'){try{_r=JSON.parse(_r);}catch{_r={};}}_cfg=_r;}catch{}res.json({...order,order_number:formatOrderNumber(order.order_number,_cfg),discount_amount:order.discount,items:items.rows});}catch(e){res.status(500).json({error:e.message});}});
 
 // Update status
 router.patch('/stores/:sid/orders/:oid/status',authMiddleware(['store_owner','store_staff']),async(req,res)=>{try{
@@ -212,6 +220,8 @@ router.patch('/stores/:sid/orders/:oid/status',authMiddleware(['store_owner','st
   try{await pool.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS prepared_by VARCHAR(64)");}catch{}
   try{await pool.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT");}catch{}
   try{await pool.query("ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_status VARCHAR(20)");}catch{}
+  if(await assignedOnlyBlocked(req,req.params.oid))return res.status(403).json({error:'This order is not assigned to you.'});
+  let _prevStatus=null;try{_prevStatus=(await pool.query('SELECT status FROM orders WHERE id=$1 AND store_id=$2',[req.params.oid,req.params.sid])).rows[0]?.status||null;}catch{}
   const{status,cancel_reason}=req.body;let extra='';const p=[status,req.params.oid,req.params.sid];if(status==='shipped')extra=',shipped_at=NOW()';if(status==='delivered')extra=",delivered_at=NOW(),payment_status=CASE WHEN payment_method='cod' THEN 'paid' ELSE payment_status END";if(status==='cancelled'){extra=',cancelled_at=NOW()';if(cancel_reason){p.push(cancel_reason);extra+=`,cancel_reason=$${p.length}`;}}if(status==='confirmed'){p.push(String(req.user.id));extra+=`,confirmed_at=NOW(),confirmed_by=$${p.length}`;}if(status==='preparing'){p.push(String(req.user.id));extra+=`,prepared_at=NOW(),prepared_by=$${p.length}`;}const r=await pool.query(`UPDATE orders SET status=$1,updated_at=NOW()${extra} WHERE id=$2 AND store_id=$3 RETURNING *`,p);try{const{notifyStore,statusLabel}=require('../services/notify');const _o=r.rows[0];if(_o&&status!=='new_order')notifyStore(req.params.sid,{type:'status',title:`Order #${_o.order_number} → ${statusLabel(status)}`,message:_o.customer_name||'',link:'/dashboard/orders?highlight='+_o.id});}catch(e){}if(!r.rows.length)return res.status(404).json({error:'Not found'});
 
   // Send notifications to customer on EVERY status change
@@ -397,6 +407,8 @@ router.patch('/stores/:sid/orders/:oid/status',authMiddleware(['store_owner','st
 
   // Append to the per-store activity log for the Settings → Users feed.
   try{const{logActivity}=require('./storeOwner');await logActivity(req.params.sid,req,'order_status_change','order',r.rows[0]?.order_number||req.params.oid,`→ ${status}`);}catch{}
+  // Who did it — the source of worker commissions (see services/workerActions.js).
+  try{await require('../services/workerActions').recordStatusChange(req,r.rows[0],_prevStatus,status);}catch(e){console.log('[worker action]',e.message);}
 
   // Auto-dispatch: if order has a delivery company with auto_dispatch and status is confirmed/preparing/shipped
   if(['confirmed','preparing','shipped'].includes(status)&&r.rows[0]?.delivery_company_id&&!r.rows[0]?.tracking_number){
