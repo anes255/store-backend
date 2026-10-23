@@ -215,16 +215,48 @@ async function createToken(row, kind, hours) {
   return raw;
 }
 
+// Invitation / reset messages in the worker's language (their own setting,
+// else the store's default language, else English).
+const LINK_MSG = {
+  en: {
+    inviteSubject: (st) => `Welcome to ${st} on MarketDz`, resetSubject: () => 'Reset your MarketDz worker password',
+    invite: (st, role, login, link) => `Welcome to MarketDz!\n\nStore: ${st}\nRole: ${role}\nLogin: ${login}\n\nSet your password and log in: ${link}\n\nThis link expires in 7 days.`,
+    reset: (st, link) => `A password reset was requested for your worker account at ${st}.\n\nSet a new password: ${link}\n\nThis link expires in 1 hour. If you did not ask for this, ignore this message.`,
+    inviteBtn: 'Set Password &amp; Login', resetBtn: 'Set a new password', staff: 'Staff',
+  },
+  fr: {
+    inviteSubject: (st) => `Bienvenue chez ${st} sur MarketDz`, resetSubject: () => 'Réinitialisez votre mot de passe MarketDz',
+    invite: (st, role, login, link) => `Bienvenue sur MarketDz !\n\nBoutique : ${st}\nRôle : ${role}\nIdentifiant : ${login}\n\nDéfinissez votre mot de passe et connectez-vous : ${link}\n\nCe lien expire dans 7 jours.`,
+    reset: (st, link) => `Une réinitialisation du mot de passe a été demandée pour votre compte chez ${st}.\n\nDéfinissez un nouveau mot de passe : ${link}\n\nCe lien expire dans 1 heure. Si vous n’êtes pas à l’origine de cette demande, ignorez ce message.`,
+    inviteBtn: 'Définir le mot de passe et se connecter', resetBtn: 'Définir un nouveau mot de passe', staff: 'Équipe',
+  },
+  ar: {
+    inviteSubject: (st) => `مرحبًا بك في ${st} على MarketDz`, resetSubject: () => 'إعادة تعيين كلمة مرور حسابك على MarketDz',
+    invite: (st, role, login, link) => `مرحبًا بك في MarketDz!\n\nالمتجر: ${st}\nالدور: ${role}\nاسم الدخول: ${login}\n\nعيّن كلمة المرور وسجّل الدخول: ${link}\n\nينتهي هذا الرابط خلال 7 أيام.`,
+    reset: (st, link) => `تم طلب إعادة تعيين كلمة المرور لحسابك في ${st}.\n\nعيّن كلمة مرور جديدة: ${link}\n\nينتهي هذا الرابط خلال ساعة واحدة. إذا لم تطلب ذلك فتجاهل هذه الرسالة.`,
+    inviteBtn: 'تعيين كلمة المرور وتسجيل الدخول', resetBtn: 'تعيين كلمة مرور جديدة', staff: 'موظف',
+  },
+};
+async function linkLanguage(row) {
+  if (['en', 'fr', 'ar'].includes(row.language)) return row.language;
+  try {
+    let cfg = (await pool.query('SELECT config FROM stores WHERE id=$1', [row.store_id])).rows[0]?.config || {};
+    if (typeof cfg === 'string') cfg = JSON.parse(cfg);
+    if (['en', 'fr', 'ar'].includes(cfg.default_language)) return cfg.default_language;
+  } catch {}
+  return 'en';
+}
+
 async function sendLink(row, storeName, link, kind) {
   const sent = [];
-  const subject = kind === 'invite' ? `Welcome to ${storeName} on MarketDz` : 'Reset your MarketDz worker password';
-  const text = kind === 'invite'
-    ? `Welcome to MarketDz!\n\nStore: ${storeName}\nRole: ${row.role && !/^(tpl_|st_)/.test(row.role) ? row.role : (row.job_type || 'Staff')}\nLogin: ${row.username || row.email}\n\nSet your password and log in: ${link}\n\nThis link expires in 7 days.`
-    : `A password reset was requested for your worker account at ${storeName}.\n\nSet a new password: ${link}\n\nThis link expires in 1 hour. If you did not ask for this, ignore this message.`;
+  const lng = await linkLanguage(row); const M = LINK_MSG[lng];
+  const subject = kind === 'invite' ? M.inviteSubject(storeName) : M.resetSubject();
+  const role = row.role && !/^(tpl_|st_)/.test(row.role) ? row.role : (row.job_type || M.staff);
+  const text = kind === 'invite' ? M.invite(storeName, role, row.username || row.email, link) : M.reset(storeName, link);
   if (row.email) {
     try {
       const { sendEmail } = require('../services/messaging');
-      const html = `<div style="font-family:Arial,sans-serif;max-width:480px;margin:auto;padding:24px"><h2 style="color:#f97316">MarketDz</h2><p>${text.split('\n\n')[0]}</p><p style="white-space:pre-line">${text.split('\n\n').slice(1, -2).join('\n')}</p><p><a href="${link}" style="display:inline-block;background:#f97316;color:#fff;padding:12px 20px;border-radius:10px;text-decoration:none;font-weight:bold">${kind === 'invite' ? 'Set Password &amp; Login' : 'Set a new password'}</a></p><p style="color:#888;font-size:12px">${text.split('\n\n').slice(-1)[0]}</p></div>`;
+      const html = `<div dir="${lng === 'ar' ? 'rtl' : 'ltr'}" style="font-family:Arial,sans-serif;max-width:480px;margin:auto;padding:24px"><h2 style="color:#f97316">MarketDz</h2><p>${text.split('\n\n')[0]}</p><p style="white-space:pre-line">${text.split('\n\n').slice(1, -2).join('\n')}</p><p><a href="${link}" style="display:inline-block;background:#f97316;color:#fff;padding:12px 20px;border-radius:10px;text-decoration:none;font-weight:bold">${kind === 'invite' ? M.inviteBtn : M.resetBtn}</a></p><p style="color:#888;font-size:12px">${text.split('\n\n').slice(-1)[0]}</p></div>`;
       const r = await sendEmail({ to: row.email, subject, html, text });
       if (r?.success) sent.push('email');
     } catch {}

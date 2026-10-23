@@ -84,7 +84,7 @@ router.get('/:slug',async(req,res)=>{try{const s=(await pool.query('SELECT * FRO
     // Scrollbar Studio (Customization → Scrollbar)
     scrollbar:cfg.scrollbar||null,
     // Customization from config
-    theme:cfg.theme||'classic',btn_add_cart:cfg.btn_add_cart||'Add to Cart',btn_order_now:cfg.btn_order_now||'Order Now',welcome_message:cfg.welcome_message,success_message:cfg.success_message,
+    theme:cfg.theme||'classic',btn_add_cart:cfg.btn_add_cart||null,btn_order_now:cfg.btn_order_now||null,welcome_message:cfg.welcome_message,success_message:cfg.success_message,
     // Order success page customization (admin → Settings → Checkout)
     success_logo:cfg.success_logo||null,success_title:cfg.success_title||null,success_subtitle:cfg.success_subtitle||null,
     // Store-wide coupon (admin → Settings → Checkout)
@@ -119,7 +119,7 @@ router.get('/:slug',async(req,res)=>{try{const s=(await pool.query('SELECT * FRO
     // also without the heavy ai_html blobs.
     config:{...cfg,landing_pages:Array.isArray(cfg.landing_pages)?cfg.landing_pages.map(lp=>{const{ai_html,...rest}=lp;return{...rest,has_ai_html:!!ai_html};}):cfg.landing_pages},
     // Footer
-    footer_text:cfg.footer_text||`© ${new Date().getFullYear()} ${s.store_name}. All rights reserved.`});}catch(e){res.status(500).json({error:e.message});}});
+    footer_text:cfg.footer_text||''});}catch(e){res.status(500).json({error:e.message});}});
 
 // Single landing page WITH its full ai_html — fetched on demand so the heavy
 // AI HTML (with embedded generated image) isn't shipped on every storefront call.
