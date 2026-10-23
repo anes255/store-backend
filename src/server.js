@@ -34,6 +34,11 @@ app.use('/api/',rateLimit({windowMs:15*60*1000,max:1000,standardHeaders:true,leg
 const authLimiter=rateLimit({windowMs:15*60*1000,max:20,standardHeaders:true,legacyHeaders:false,skipSuccessfulRequests:true,message:{error:'Too many attempts. Please try again later.'}});
 app.use(['/api/owner/login','/api/owner/register','/api/owner/register/request-otp','/api/owner/register/verify-otp','/api/owner/login/verify-2fa','/api/owner/login/resend-2fa','/api/owner/staff/login','/api/platform/login','/api/workers/login','/api/workers/forgot-password','/api/workers/reset-password','/api/owner/forgot-password','/api/platform/forgot-password'],authLimiter);
 
+// Buyer accounts and public AI endpoints (each AI call costs money).
+app.use(['/api/store/:slug/customers/login','/api/store/:slug/customers/register'],authLimiter);
+const aiLimiter=rateLimit({windowMs:15*60*1000,max:60,standardHeaders:true,legacyHeaders:false,message:{error:'Too many requests, please slow down.'}});
+app.use(['/api/ai/translate','/api/ai/:slug/chatbot'],aiLimiter);
+
 const pool=require('./config/db');
 
 // Root + health
@@ -58,8 +63,13 @@ const routes=[
 for(const[path,file]of routes){try{app.use(path,require(file));console.log('✅',path);}catch(e){console.error('❌',file,e.message);}}
 
 // Carrier webhook (public, no auth prefix — accept GET and POST)
-app.all('/api/webhook/carrier/:storeId/:carrierId',async(req,res)=>{
+app.all(['/api/webhook/carrier/:storeId/:carrierId','/api/webhook/carrier/:storeId/:carrierId/:key'],async(req,res)=>{
   try{
+    // The key (from the dashboard's "copy webhook URL") proves the caller was
+    // given this URL; store and carrier ids alone are public.
+    const{signMatch}=require('./middleware/auth');
+    if(!signMatch('carrier',req.params.storeId+':'+req.params.carrierId,req.params.key||req.query.key))return res.status(401).json({error:'Invalid webhook key'});
+    if(req.query&&'key' in req.query)delete req.query.key;
     const merged={...(req.query||{}),...(req.body||{})};
     let tracking=merged.tracking||merged.tracking_number||merged.Tracking||merged.code||merged.parcel_id||merged.order_id||'';
     if(!tracking&&merged.data){
@@ -220,7 +230,8 @@ const abandonedCartCheck=async()=>{
       const customerName=cart.customer_name||'Valued Customer';
 
       const isCheckout=isCheckoutCart;
-      const recoverUrl=`${storeUrl}/checkout?recover=${encodeURIComponent(cart.customer_phone)}`;
+      const{signValue}=require('./middleware/auth');
+      const recoverUrl=`${storeUrl}/checkout?recover=${cart.id}.${signValue('cart',cart.id)}`;
       const linkUrl=isCheckout?recoverUrl:storeUrl;
 
       // WhatsApp message (Arabic) — checkout abandonment gets a tailored message

@@ -546,6 +546,13 @@ router.post('/stores/:sid/delivery-companies',authMiddleware(['store_owner']),as
 // Mark ONE carrier as the store default. Buyers get it pre-selected at
 // checkout; they can still pick any other carrier. Passing {default:false}
 // clears the flag, leaving the store with no default.
+// Webhook key for the carrier's status-push URL (see /api/webhook/carrier in server.js).
+router.get('/stores/:sid/delivery-companies/:did/webhook-key',authMiddleware(['store_owner']),async(req,res)=>{try{
+  const dc=(await pool.query('SELECT id FROM delivery_companies WHERE id=$1 AND store_id=$2',[req.params.did,req.params.sid])).rows[0];
+  if(!dc)return res.status(404).json({error:'Not found'});
+  const{signValue}=require('../middleware/auth');
+  res.json({key:signValue('carrier',req.params.sid+':'+req.params.did)});
+}catch(e){res.status(500).json({error:e.message});}});
 router.patch('/stores/:sid/delivery-companies/:did/default',authMiddleware(['store_owner']),async(req,res)=>{try{
   const on = req.body?.default !== false;
   await pool.query('UPDATE delivery_companies SET is_default=FALSE WHERE store_id=$1',[req.params.sid]);
@@ -1788,46 +1795,6 @@ router.post('/stores/:sid/delivery-companies/:did/full-sync',authMiddleware(['st
     try{const r=await updateTracking(req.params.sid,o,dc);if(r)trackingUpdated++;}catch{}
   }
   res.json({...result,tracking_updated:trackingUpdated});
-}catch(e){res.status(500).json({error:e.message});}});
-
-// Webhook endpoint for carriers to push status updates (no auth - uses carrier ID as path)
-router.all('/webhook/carrier/:sid/:did',async(req,res)=>{try{
-  const merged={...(req.query||{}),...(req.body||{})};
-  let tracking=merged.tracking||merged.tracking_number||merged.Tracking||merged.code||merged.parcel_id||merged.order_id||'';
-  if(!tracking&&merged.data){
-    const d=typeof merged.data==='string'?(()=>{try{return JSON.parse(merged.data);}catch{return{};}})():merged.data;
-    tracking=d.tracking||d.tracking_number||d.code||d.order_id||'';
-  }
-  if(!tracking&&Array.isArray(merged.trackings)&&merged.trackings[0]){
-    const t0=merged.trackings[0];tracking=typeof t0==='string'?t0:(t0.tracking||t0.tracking_number||'');
-  }
-  let status=merged.status||merged.last_status||merged.Situation||merged.event||merged.last_situation||'';
-  if(!status&&merged.activity){
-    const a=Array.isArray(merged.activity)?merged.activity[0]:merged.activity;
-    status=a?.event||a?.status||'';
-  }
-  if(!tracking){
-    const ref=merged.reference||merged.external_id||merged.display_id||'';
-    if(ref){
-      const match=await pool.query("SELECT tracking_number FROM orders WHERE store_id=$1 AND (external_id=$2 OR tracking_number=$2) LIMIT 1",[req.params.sid,ref]);
-      if(match.rows[0])tracking=match.rows[0].tracking_number||ref;
-      else tracking=ref;
-    }
-  }
-  if(!tracking)return res.status(400).json({error:'Missing tracking number'});
-  const mapSt=(s)=>{const t=String(s||'').toLowerCase().replace(/\s+/g,'_');
-    if(/livr[éeè]|deliver|^livred$/.test(t))return'delivered';
-    if(/encaiss|^payed$|paiement_pret|paiement_archive/.test(t))return'delivered';
-    if(/exp[éeè]di|ship|picked|dispatched|transit|attempt|en_livraison|vers_wilaya|vers_hub|en_hub|en_preparation|ramassage/.test(t))return'shipped';
-    if(/received_by_carrier|accepted_by_carrier|pret_a_expedier|pret_a_preparer|stock_en_preparation/.test(t))return'preparing';
-    if(/retour|return|suspendu/.test(t))return'returned';
-    if(/annul|cancel/.test(t))return'cancelled';
-    return'shipped';};
-  await pool.query(
-    "UPDATE orders SET tracking_status=$1,status=$2,carrier_data=$3::jsonb,tracking_updated_at=NOW(),updated_at=NOW() WHERE store_id=$4 AND tracking_number=$5",
-    [String(status).toLowerCase().replace(/\s+/g,'_'),mapSt(status),JSON.stringify(merged),req.params.sid,tracking]
-  );
-  res.json({ok:true});
 }catch(e){res.status(500).json({error:e.message});}});
 
 // Bulk refresh tracking for all orders of a carrier

@@ -383,6 +383,13 @@ router.post('/:slug/orders/:oid/cancel',async(req,res)=>{try{
   if(!store)return res.status(404).json({error:'Not found'});
   const order=(await pool.query('SELECT * FROM orders WHERE id=$1 AND store_id=$2',[req.params.oid,store.id])).rows[0];
   if(!order)return res.status(404).json({error:'Order not found'});
+  // Only the buyer may cancel: their signed-in account, or the order's phone.
+  {let ok=false;
+   const tk=req.headers.authorization?.split(' ')[1];
+   if(tk){try{const d=require('jsonwebtoken').verify(tk,require('../middleware/auth').jwtSecret);ok=d.role==='customer'&&!!order.customer_id&&d.id===order.customer_id;}catch{}}
+   const last9=(v)=>String(v||'').replace(/\D/g,'').slice(-9);
+   if(!ok&&req.body?.phone&&last9(req.body.phone).length===9)ok=last9(req.body.phone)===last9(order.customer_phone);
+   if(!ok)return res.status(403).json({error:'Phone number does not match this order'});}
   if(['shipped','delivered','cancelled'].includes(order.status))return res.status(400).json({error:`Cannot cancel — order is already ${order.status}`});
   const r=await pool.query("UPDATE orders SET status='cancelled',cancelled_at=NOW(),cancel_reason='Cancelled by customer',updated_at=NOW() WHERE id=$1 RETURNING *",[order.id]);
   // Notify store owner
@@ -519,18 +526,30 @@ router.post('/:slug/save-cart',async(req,res)=>{try{
 
 // ═══ RESTORE CART (for checkout recovery links) ═══
 router.get('/:slug/restore-cart',async(req,res)=>{try{
-  const{phone}=req.query;
-  if(!phone)return res.status(400).json({error:'Phone required'});
+  const{phone,token}=req.query;
+  if(!phone&&!token)return res.status(400).json({error:'Phone required'});
   const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];
   if(!store)return res.status(404).json({error:'Store not found'});
-  const cart=(await pool.query(
-    `SELECT * FROM carts WHERE store_id=$1 AND customer_phone=$2
-     AND is_recovered=FALSE ORDER BY updated_at DESC LIMIT 1`,
-    [store.id,phone])).rows[0];
+  let cart;
+  if(token){
+    // Recovery links carry "<cart id>.<signature>" (see server.js).
+    const[cid,sig]=String(token).split('.');
+    const{signMatch}=require('../middleware/auth');
+    if(!cid||!signMatch('cart',cid,sig))return res.json({found:false});
+    cart=(await pool.query('SELECT * FROM carts WHERE id::text=$1 AND store_id=$2 AND is_recovered=FALSE',[cid,store.id])).rows[0];
+  }else{
+    cart=(await pool.query(
+      `SELECT * FROM carts WHERE store_id=$1 AND customer_phone=$2
+       AND is_recovered=FALSE ORDER BY updated_at DESC LIMIT 1`,
+      [store.id,phone])).rows[0];
+  }
   if(!cart)return res.json({found:false});
   let items=cart.items;
   if(typeof items==='string')try{items=JSON.parse(items);}catch{items=[];}
-  res.json({found:true,cart:{
+  // Old links only carry the phone, which anyone could type: give back the
+  // cart contents but none of the buyer's personal details.
+  if(!token)return res.json({found:true,cart:{items,total:cart.total}});
+  res.json({found:true,cart:{customer_phone:cart.customer_phone,
     customer_name:cart.customer_name,customer_email:cart.customer_email,
     items,total:cart.total,
     shipping_address:cart.shipping_address,shipping_city:cart.shipping_city,
@@ -590,7 +609,19 @@ router.get('/:slug/track',async(req,res)=>{try{
       }
     }catch(e){}
   }
-  res.json(orders.rows.map(o=>({...o,order_number:formatOrderNumber(o.order_number,scfg),items:itemsByOrder[o.id]||[]})));
+  // Order numbers are sequential and phones can be guessed, so the public
+  // page never gets the street address or full contact details.
+  const maskName=(n)=>{const p=String(n||'').trim().split(/\s+/).filter(Boolean);return p.length?p[0]+(p[1]?' '+p[1][0]+'.':''):'';};
+  const maskPhone=(v)=>{const d=String(v||'').replace(/\D/g,'');return d?'•'.repeat(Math.max(0,d.length-2))+d.slice(-2):'';};
+  const maskEmail=(v)=>{const m=String(v||'').match(/^(.)[^@]*(@.+)$/);return m?m[1]+'***'+m[2]:'';};
+  const byPhone=!order_id;
+  res.json(orders.rows.map(o=>{
+    const{shipping_address,customer_name,customer_phone,customer_email,notes,...rest}=o;
+    return{...rest,customer_name:maskName(customer_name),customer_phone:maskPhone(customer_phone),customer_email:maskEmail(customer_email),
+      notes:byPhone?notes:null,
+      order_number:formatOrderNumber(o.order_number,scfg),
+      items:(itemsByOrder[o.id]||[]).map(it=>({id:it.id,order_id:it.order_id,product_id:it.product_id,name:it.name,product_name:it.product_name,image:it.image||it.product_image,product_image:it.product_image,quantity:it.quantity,price:it.price,unit_price:it.unit_price,total_price:it.total_price,variant_info:it.variant_info,variant_label:it.variant_label}))};
+  }));
 }catch(e){res.status(500).json({error:e.message});}});
 
 // Dedicated visit tracking — called once per browser session by the Storefront page only.

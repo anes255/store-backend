@@ -21,5 +21,9 @@ next();}catch(e){res.status(401).json({error:'Invalid token'});}})();};
 // a 6-digit code can be brute-forced offline, so key the hash with the secret.
 const otpHash=(code)=>crypto.createHmac('sha256',SECRET).update('otp:'+String(code).trim()).digest('hex');
 const otpMatch=(code,h)=>{const a=Buffer.from(otpHash(code)),b=Buffer.from(String(h||''));return a.length===b.length&&crypto.timingSafeEqual(a,b);};
+// Short keyed signatures for values put in public links (webhook URLs, cart
+// recovery links), so a link can't be forged from ids alone.
+const signValue=(purpose,v)=>crypto.createHmac('sha256',SECRET).update(purpose+':'+v).digest('hex').slice(0,32);
+const signMatch=(purpose,v,sig)=>{const a=Buffer.from(signValue(purpose,v)),b=Buffer.from(String(sig||''));return a.length===b.length&&crypto.timingSafeEqual(a,b);};
 const generateToken=(p,exp='30d')=>jwt.sign(p,SECRET,{expiresIn:exp});
-module.exports={otpHash,otpMatch,jwtSecret:SECRET,authMiddleware,generateToken};
+module.exports={otpHash,otpMatch,signValue,signMatch,jwtSecret:SECRET,authMiddleware,generateToken};
