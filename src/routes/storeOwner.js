@@ -1,5 +1,5 @@
 const express=require('express'),router=express.Router(),bcrypt=require('bcryptjs'),pool=require('../config/db'),{authMiddleware,generateToken}=require('../middleware/auth'),slugify=require('slugify'),jwt=require('jsonwebtoken');
-const OTP_JWT_SECRET=process.env.JWT_SECRET||'kyomarket-secret-key-2026-do-not-change';
+const OTP_JWT_SECRET=require('../middleware/auth').jwtSecret;
 let _waBaileysCache;function _getWaBaileys(){if(_waBaileysCache!==undefined)return _waBaileysCache;try{_waBaileysCache=require('../services/whatsappBaileys');}catch{_waBaileysCache=null;}return _waBaileysCache;}
 const waBaileys=new Proxy({},{get(_,prop){const mod=_getWaBaileys();if(!mod){if(prop==='getStatus')return()=>({connected:false,status:'not_available'});if(prop==='sendMessage')return async()=>({success:false,reason:'WhatsApp service not available'});if(prop==='startSession'||prop==='disconnectSession'||prop==='restoreSessions')return async()=>{};return undefined;}return mod[prop];}});
 const PLATFORM_WA_STORE_ID=process.env.PLATFORM_WA_STORE_ID||'platform';
@@ -15,7 +15,7 @@ const { loadPlanFeatures: _lpf, enforceQuota: _eq, requireFeature: _rf } = requi
 // ─────────────────────────────────────────────────────────────────────────────
 async function send2FACode(owner, purpose) {
   const code = Math.floor(100000 + Math.random() * 900000).toString();
-  const otpHash = await bcrypt.hash(code, 8);
+  const otpHash = require('../middleware/auth').otpHash(code);
   const method = ['whatsapp','email'].includes(owner.two_fa_method) ? owner.two_fa_method : 'whatsapp';
 
   let sent = false, reason = '';
@@ -60,7 +60,7 @@ async function verify2FACode(otp_token, code, expectedPurpose) {
   try { payload = jwt.verify(otp_token, OTP_JWT_SECRET); }
   catch { return { ok:false, error:'Verification expired. Request a new code.' }; }
   if (payload.purpose !== expectedPurpose) return { ok:false, error:'Invalid verification token' };
-  if (!(await bcrypt.compare(String(code).trim(), payload.otpHash))) return { ok:false, error:'Invalid verification code' };
+  if (!require('../middleware/auth').otpMatch(code,payload.otpHash)) return { ok:false, error:'Invalid verification code' };
   return { ok:true, payload };
 }
 
@@ -200,7 +200,7 @@ router.post('/register/request-otp',async(req,res)=>{try{
   if(dup.rows.length)return res.status(409).json({error:'Already registered'});
   // Generate OTP
   const code=Math.floor(100000+Math.random()*900000).toString();
-  const otpHash=await bcrypt.hash(code,8);
+  const otpHash=require('../middleware/auth').otpHash(code);
   const passwordHash=await bcrypt.hash(password,12);
   // Send WhatsApp — ONLY the super admin's connected platform session.
   let sent=false,reason='';
@@ -223,7 +223,7 @@ router.post('/register/verify-otp',async(req,res)=>{try{
   let payload;
   try{payload=jwt.verify(otp_token,OTP_JWT_SECRET);}catch(e){return res.status(401).json({error:'Verification session expired. Please restart registration.'});}
   if(payload.purpose!=='register_otp')return res.status(401).json({error:'Invalid token'});
-  if(!(await bcrypt.compare(String(code).trim(),payload.otpHash)))return res.status(401).json({error:'Invalid verification code'});
+  if(!require('../middleware/auth').otpMatch(code,payload.otpHash))return res.status(401).json({error:'Invalid verification code'});
   const{name,email,phone,passwordHash,address,city,wilaya}=payload;
   // Re-check dup (race safety)
   const dup=await pool.query('SELECT id FROM store_owners WHERE LOWER(email)=$1 OR phone=$2',[email,phone]);

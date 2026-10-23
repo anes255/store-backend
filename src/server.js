@@ -32,7 +32,7 @@ app.use(compression());app.use(cookieParser());app.use(express.json({limit:'50mb
 app.use('/api/',rateLimit({windowMs:15*60*1000,max:1000,standardHeaders:true,legacyHeaders:false,message:{error:'Too many requests, please slow down.'}}));
 // Strict limiter for auth/credential endpoints to blunt brute-force & abuse
 const authLimiter=rateLimit({windowMs:15*60*1000,max:20,standardHeaders:true,legacyHeaders:false,skipSuccessfulRequests:true,message:{error:'Too many attempts. Please try again later.'}});
-app.use(['/api/owner/login','/api/owner/register','/api/owner/register/request-otp','/api/owner/register/verify-otp','/api/owner/login/verify-2fa','/api/owner/login/resend-2fa','/api/owner/staff/login','/api/platform/login','/api/workers/login','/api/workers/forgot-password','/api/workers/reset-password'],authLimiter);
+app.use(['/api/owner/login','/api/owner/register','/api/owner/register/request-otp','/api/owner/register/verify-otp','/api/owner/login/verify-2fa','/api/owner/login/resend-2fa','/api/owner/staff/login','/api/platform/login','/api/workers/login','/api/workers/forgot-password','/api/workers/reset-password','/api/owner/forgot-password','/api/platform/forgot-password'],authLimiter);
 
 const pool=require('./config/db');
 

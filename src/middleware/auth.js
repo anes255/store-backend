@@ -17,5 +17,9 @@ if(d.role==='platform_admin'&&d.id&&d.id!=='admin'){try{const r=await pool.query
 // Store ownership + staff permissions (see staffAccess.js).
 try{const deny=await checkAccess(req,opts);if(deny)return res.status(deny.status).json({error:deny.error,code:deny.code,missing_permission:deny.missing});}catch(e){console.error('[access]',e.message);return res.status(500).json({error:'Access check failed'});}
 next();}catch(e){res.status(401).json({error:'Invalid token'});}})();};
+// OTP codes travel inside a signed (but readable) JWT. A plain bcrypt hash of
+// a 6-digit code can be brute-forced offline, so key the hash with the secret.
+const otpHash=(code)=>crypto.createHmac('sha256',SECRET).update('otp:'+String(code).trim()).digest('hex');
+const otpMatch=(code,h)=>{const a=Buffer.from(otpHash(code)),b=Buffer.from(String(h||''));return a.length===b.length&&crypto.timingSafeEqual(a,b);};
 const generateToken=(p,exp='30d')=>jwt.sign(p,SECRET,{expiresIn:exp});
-module.exports={authMiddleware,generateToken};
+module.exports={otpHash,otpMatch,jwtSecret:SECRET,authMiddleware,generateToken};

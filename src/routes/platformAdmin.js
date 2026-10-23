@@ -98,7 +98,7 @@ router.post('/login',async(req,res)=>{
 
 // ═══ FORGOT PASSWORD (Super Admin) ═══
 const jwt=require('jsonwebtoken');
-const OTP_JWT_SECRET_PA=process.env.JWT_SECRET||'kyomarket-secret-key-2026-do-not-change';
+const OTP_JWT_SECRET_PA=require('../middleware/auth').jwtSecret;
 function getWaBaileys(){try{return require('../services/whatsappBaileys');}catch{return null;}}
 const PLATFORM_WA_STORE_ID=process.env.PLATFORM_WA_STORE_ID||'platform';
 
@@ -120,7 +120,7 @@ router.post('/forgot-password', async (req, res) => {
     const waBaileys = getWaBaileys();
     if (!waBaileys) return res.status(503).json({ error: 'WhatsApp service not available' });
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const otpHash = await bcrypt.hash(code, 8);
+    const otpHash = require('../middleware/auth').otpHash(code);
     const status = waBaileys.getStatus(PLATFORM_WA_STORE_ID);
     if (!status.connected) return res.status(503).json({ error: 'Platform WhatsApp is offline. Cannot send reset code.' });
     const msg = `🔐 ${code}\n\nYour MakretDZ password reset code. Expires in 10 minutes.\nIf you didn't request this, ignore this message.`;
@@ -139,7 +139,7 @@ router.post('/forgot-password/verify', async (req, res) => {
     let payload;
     try { payload = jwt.verify(otp_token, OTP_JWT_SECRET_PA); } catch { return res.status(401).json({ error: 'Code expired. Request a new one.' }); }
     if (payload.purpose !== 'admin_password_reset') return res.status(401).json({ error: 'Invalid token' });
-    if (!(await bcrypt.compare(String(code).trim(), payload.otpHash))) return res.status(401).json({ error: 'Invalid code' });
+    if (!require('../middleware/auth').otpMatch(code,payload.otpHash)) return res.status(401).json({ error: 'Invalid code' });
     const resetToken = jwt.sign({ purpose: 'admin_do_reset', admin_id: payload.admin_id }, OTP_JWT_SECRET_PA, { expiresIn: '5m' });
     res.json({ reset_token: resetToken });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -814,26 +814,6 @@ async function ensureAdminsTable(){
 }
 ensureAdminsTable();
 
-// DEBUG: inspect admins table (no auth, temp)
-router.get('/admins-debug',async(req,res)=>{
-  try{await ensureAdminsTable();
-    const r=await pool.query('SELECT id,full_name,phone,email,role,is_active,LENGTH(password_hash) as hash_len,created_at FROM platform_admins ORDER BY created_at DESC');
-    res.json({count:r.rows.length,admins:r.rows});
-  }catch(e){res.status(500).json({error:e.message,stack:e.stack});}
-});
-// DEBUG: test credentials without creating a session — accepts GET query or POST body
-const adminsTestHandler=async(req,res)=>{
-  try{const src=req.method==='GET'?req.query:(req.body||{});const{phone,password}=src;const p=(phone||'').toString().trim();const pw=(password||'').toString().trim();
-    const digits=p.replace(/[^0-9]/g,'');const last9=digits.slice(-9);
-    const all=(await pool.query('SELECT id,phone,is_active,password_hash FROM platform_admins')).rows;
-    const admin=all.find(r=>{const rp=(r.phone||'').toString();const rd=rp.replace(/[^0-9]/g,'');return rp.trim()===p||rd===digits||(last9&&rd.slice(-9)===last9);});
-    let pwOk=false;let bcryptError=null;
-    if(admin){try{pwOk=await bcrypt.compare(pw,admin.password_hash||'');}catch(e){bcryptError=e.message;}}
-    res.json({input_phone:p,input_pw_len:pw.length,input_digits:digits,total_rows:all.length,rows:all.map(r=>({phone:r.phone,active:r.is_active,hash_len:(r.password_hash||'').length,hash_prefix:(r.password_hash||'').substring(0,7)})),matched:!!admin,matched_phone:admin?.phone,matched_active:admin?.is_active,password_match:pwOk,bcrypt_error:bcryptError});
-  }catch(e){res.status(500).json({error:e.message});}
-};
-router.get('/admins-test',adminsTestHandler);
-router.post('/admins-test',adminsTestHandler);
 
 router.get('/admins', authMiddleware(['platform_admin']), async (req, res) => {
   try { await ensureAdminsTable();
