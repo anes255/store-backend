@@ -317,10 +317,11 @@ setTimeout(runFullSync,60000);
 console.log('✅ Carrier sync cron started (every 10min — syncs orders from carriers + updates tracking)');
 
 // ═══ STORE PURGE CRON (every hour) ═══
-const{runStorePurge}=require('./services/storePurge');
-setInterval(runStorePurge,60*60*1000);
-setTimeout(runStorePurge,90000);
-console.log('✅ Store purge cron started (every 1h — deletes stores whose 14-day deletion cooldown has passed)');
+const{runStorePurge,runCustomerPurge}=require('./services/storePurge');
+const runPurges=async()=>{await runStorePurge();await runCustomerPurge();};
+setInterval(runPurges,60*60*1000);
+setTimeout(runPurges,90000);
+console.log('✅ Purge cron started (every 1h — deletes stores and buyer accounts whose 14-day deletion cooldown has passed)');
 
 // ═══ KEEP-ALIVE PING (prevents Render free-tier shutdown) ═══
 const SELF_URL=process.env.RENDER_EXTERNAL_URL||process.env.BACKEND_URL||`http://localhost:${PORT}`;

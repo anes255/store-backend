@@ -41,4 +41,36 @@ async function runStorePurge() {
   } catch (e) { console.log('[Store Purge Error]', e.message); }
 }
 
-module.exports = { COOLDOWN_DAYS, purgeStore, runStorePurge };
+// Buyer accounts use the same cooldown (customers.deletion_scheduled_at). The
+// store keeps its order history and reviews: they are detached from the
+// account (customer_id = NULL) and keep their name/phone snapshot.
+async function purgeCustomer(cid) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const c = (await client.query('SELECT id FROM customers WHERE id=$1 AND deletion_scheduled_at IS NOT NULL AND deletion_scheduled_at<=NOW() FOR UPDATE', [cid])).rows[0];
+    if (!c) { await client.query('ROLLBACK'); return false; }
+    await client.query('UPDATE orders SET customer_id=NULL WHERE customer_id=$1', [cid]);
+    await client.query('SAVEPOINT sp');
+    try { await client.query('UPDATE reviews SET customer_id=NULL WHERE customer_id=$1', [cid]); await client.query('RELEASE SAVEPOINT sp'); }
+    catch { await client.query('ROLLBACK TO SAVEPOINT sp'); }
+    await client.query('DELETE FROM customers WHERE id=$1', [cid]);
+    await client.query('COMMIT');
+    return true;
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch {}
+    throw e;
+  } finally { client.release(); }
+}
+
+async function runCustomerPurge() {
+  try {
+    const due = (await pool.query('SELECT id FROM customers WHERE deletion_scheduled_at IS NOT NULL AND deletion_scheduled_at<=NOW()')).rows;
+    for (const c of due) {
+      try { if (await purgeCustomer(c.id)) console.log(`[Customer Purge] Deleted customer ${c.id}`); }
+      catch (e) { console.log(`[Customer Purge] Failed for ${c.id}:`, e.message); }
+    }
+  } catch (e) { console.log('[Customer Purge Error]', e.message); }
+}
+
+module.exports = { COOLDOWN_DAYS, purgeStore, runStorePurge, purgeCustomer, runCustomerPurge };

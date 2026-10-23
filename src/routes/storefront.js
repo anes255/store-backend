@@ -163,7 +163,10 @@ router.post('/:slug/customers/register',async(req,res)=>{try{const store=(await 
   const dup=await pool.query('SELECT id FROM customers WHERE store_id=$1 AND phone=$2',[store.id,phone]);if(dup.rows.length)return res.status(409).json({error:'Phone registered'});const hash=await bcrypt.hash(password,12);const r=await pool.query('INSERT INTO customers(store_id,full_name,email,phone,password_hash,address,city,wilaya) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,full_name,email,phone,address,city,wilaya',[store.id,name,email||null,phone,hash,address||null,city||null,wilaya||null]);const c=r.rows[0];const token=generateToken({id:c.id,role:'customer',storeId:store.id,name:c.full_name});try{const{notifyStore}=require('../services/notify');notifyStore(store.id,{type:'customer',title:`New customer: ${name||phone}`,message:phone||'',link:'/dashboard/customers?highlight='+c.id});}catch(e){}res.status(201).json({token,customer:{id:c.id,name:c.full_name,email:c.email,phone:c.phone,address:c.address,city:c.city,wilaya:c.wilaya}});}catch(e){res.status(500).json({error:e.message});}});
 
 // Customer login
-router.post('/:slug/customers/login',async(req,res)=>{try{const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.status(404).json({error:'Not found'});const{phone,password}=req.body;const c=(await pool.query('SELECT * FROM customers WHERE store_id=$1 AND phone=$2',[store.id,phone])).rows[0];if(!c)return res.status(401).json({error:'Invalid'});if(!(await bcrypt.compare(password,c.password_hash)))return res.status(401).json({error:'Invalid'});const token=generateToken({id:c.id,role:'customer',storeId:store.id,name:c.full_name});res.json({token,customer:{id:c.id,name:c.full_name,email:c.email,phone:c.phone,address:c.address||null,city:c.city||null,wilaya:c.wilaya||null}});}catch(e){res.status(500).json({error:e.message});}});
+router.post('/:slug/customers/login',async(req,res)=>{try{const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.status(404).json({error:'Not found'});const{phone,password}=req.body;const c=(await pool.query('SELECT * FROM customers WHERE store_id=$1 AND phone=$2',[store.id,phone])).rows[0];if(!c)return res.status(401).json({error:'Invalid'});if(!(await bcrypt.compare(password,c.password_hash)))return res.status(401).json({error:'Invalid'});
+  // Signing in during the deletion cooldown cancels the scheduled deletion.
+  let deletionCancelled=false;if(c.deletion_scheduled_at){try{await pool.query('UPDATE customers SET deletion_scheduled_at=NULL WHERE id=$1',[c.id]);deletionCancelled=true;}catch(e){}}
+  const token=generateToken({id:c.id,role:'customer',storeId:store.id,name:c.full_name});res.json({token,deletion_cancelled:deletionCancelled,customer:{id:c.id,name:c.full_name,email:c.email,phone:c.phone,address:c.address||null,city:c.city||null,wilaya:c.wilaya||null}});}catch(e){res.status(500).json({error:e.message});}});
 
 // Customer profile
 router.get('/:slug/customers/profile',authMiddleware([]),async(req,res)=>{try{const c=(await pool.query('SELECT * FROM customers WHERE id=$1',[req.user.id])).rows[0];if(!c)return res.status(403).json({error:'Not a customer account'});const orders=(await pool.query('SELECT * FROM orders WHERE customer_id=$1 ORDER BY created_at DESC',[req.user.id])).rows;let storeCfg2={};try{let _r2=(await pool.query('SELECT config FROM stores WHERE slug=$1',[req.params.slug])).rows[0]?.config||{};if(typeof _r2==='string'){try{_r2=JSON.parse(_r2);}catch{_r2={};}}storeCfg2=_r2;}catch(e){}
@@ -197,6 +200,22 @@ router.get('/:slug/customers/profile',authMiddleware([]),async(req,res)=>{try{co
     }catch(e){}
   }
   res.json({...c,name:c.full_name,orders:orders.map(o=>({...o,order_number:formatOrderNumber(o.order_number,storeCfg2),discount_amount:o.discount,items:itemsByOrder[o.id]||[]}))});}catch(e){res.status(500).json({error:e.message});}});
+// Schedule the signed-in customer's account for deletion. Like store deletion it
+// has a cooldown: the account is purged COOLDOWN_DAYS later by the
+// runCustomerPurge job (orders are kept for the store, detached from the
+// account). Signing in again or POST cancel-deletion cancels it.
+router.delete('/:slug/customers/profile',authMiddleware([]),async(req,res)=>{try{
+  const{COOLDOWN_DAYS}=require('../services/storePurge');
+  const r=await pool.query('UPDATE customers SET deletion_scheduled_at=COALESCE(deletion_scheduled_at,NOW()+make_interval(days=>$2)) WHERE id=$1 RETURNING deletion_scheduled_at',[req.user.id,COOLDOWN_DAYS]);
+  if(!r.rows[0])return res.status(403).json({error:'Not a customer account'});
+  res.json({ok:true,deletion_scheduled_at:r.rows[0].deletion_scheduled_at,cooldown_days:COOLDOWN_DAYS});
+}catch(e){res.status(500).json({error:e.message});}});
+// Cancel the signed-in customer's scheduled account deletion.
+router.post('/:slug/customers/profile/cancel-deletion',authMiddleware([]),async(req,res)=>{try{
+  const r=await pool.query('UPDATE customers SET deletion_scheduled_at=NULL WHERE id=$1 RETURNING id',[req.user.id]);
+  if(!r.rows[0])return res.status(403).json({error:'Not a customer account'});
+  res.json({ok:true,deletion_scheduled_at:null});
+}catch(e){res.status(500).json({error:e.message});}});
 // Change password (signed-in customer): needs the current password.
 router.put('/:slug/customers/password',authMiddleware([]),async(req,res)=>{try{
   const{current_password,new_password}=req.body||{};

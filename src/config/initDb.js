@@ -483,6 +483,8 @@ const initDb=async()=>{
     // Store deletion cooldown: set when the owner schedules deletion, cleared on
     // cancel; services/storePurge.js removes the store once it has passed.
     try{await pool.query("ALTER TABLE stores ADD COLUMN IF NOT EXISTS deletion_scheduled_at TIMESTAMPTZ");}catch(e){}
+    // Same cooldown for buyer accounts (services/storePurge.js runCustomerPurge).
+    try{await pool.query("ALTER TABLE customers ADD COLUMN IF NOT EXISTS deletion_scheduled_at TIMESTAMPTZ");}catch(e){}
     // Order in which the store's delivery companies are listed at checkout.
     try{await pool.query("ALTER TABLE delivery_companies ADD COLUMN IF NOT EXISTS sort_order INT");}catch(e){}
     // One-off cleanup: hide the empty orders earlier carrier syncs created.
