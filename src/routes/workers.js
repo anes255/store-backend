@@ -323,7 +323,8 @@ router.get('/stores/:sid/me', auth, async (req, res) => {
     const payroll = (await pool.query(
       `SELECT pi.id, pp.year, pp.month, pi.currency, pi.fixed_amount, pi.commission_amount, pi.bonuses, pi.deductions, pi.net_amount, pi.status
        FROM payroll_items pi JOIN payroll_periods pp ON pp.id=pi.period_id WHERE pi.staff_id=$1 ORDER BY pp.year DESC, pp.month DESC LIMIT 12`, [wid])).rows;
-    res.json({ is_staff: true, worker: row ? { ...row, full_name: fullName(row) } : null, counts, assigned, earnings: earnings[wid] || {}, recent, payroll, period: { year, month } });
+    const fx = (await storeCfg(req.params.sid)).fx_rates || null;
+    res.json({ is_staff: true, worker: row ? { ...row, full_name: fullName(row) } : null, counts, assigned, earnings: earnings[wid] || {}, recent, payroll, period: { year, month }, fx_rates: fx });
   } catch (e) { console.error('[workers me]', e.message); res.status(500).json({ error: e.message }); }
 });
 
@@ -699,6 +700,29 @@ router.post('/stores/:sid/workers/:wid/reset-password', auth, async (req, res) =
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Give an existing worker access to another of the owner's stores (same
+// login; job, role and permissions copied, editable there afterwards).
+router.post('/stores/:sid/workers/:wid/stores', auth, async (req, res) => {
+  try {
+    if (req.user.staff_id) return res.status(403).json({ error: 'Only the store owner can give access to other stores.' });
+    const { sid, wid } = req.params;
+    const target = req.body?.store_id;
+    if (!isUuid(target)) return res.status(400).json({ error: 'Pick a store' });
+    const owns = (await pool.query('SELECT store_name FROM stores WHERE id=$1 AND owner_id=$2', [target, req.user.id])).rows[0];
+    if (!owns) return res.status(403).json({ error: 'You do not own this store.' });
+    const w = (await pool.query('SELECT * FROM store_staff WHERE id=$1 AND store_id=$2', [wid, sid])).rows[0];
+    if (!w) return res.status(404).json({ error: 'Worker not found' });
+    const sib = await siblingRows(w, req.user.id);
+    if (sib.some((x) => String(x.store_id) === String(target))) return res.status(409).json({ error: 'Already working in this store.' });
+    const r = await pool.query(
+      `INSERT INTO store_staff(store_id,name,first_name,last_name,email,phone,username,password_hash,role,role_template_id,permissions,avatar,date_of_birth,address,notes,job_type,status,is_active,session_version)
+       SELECT $1,name,first_name,last_name,email,phone,username,password_hash,role,NULL,permissions,avatar,date_of_birth,address,notes,job_type,status,is_active,session_version FROM store_staff WHERE id=$2 RETURNING id`, [target, wid]);
+    forgetStaff();
+    await audit(sid, req, 'worker_store_added', 'worker', wid, { store: owns.store_name });
+    res.json({ ok: true, worker_id: r.rows[0].id });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.post('/stores/:sid/workers/:wid/revoke-sessions', auth, async (req, res) => {
   try {
     const { sid, wid } = req.params;
@@ -741,6 +765,14 @@ router.delete('/stores/:sid/workers/:wid', auth, async (req, res) => {
 });
 
 // ── ORDER ASSIGNMENT / TIMELINE ────────────────────────────────────────────
+// Active workers an order can be assigned to (name + job only).
+router.get('/stores/:sid/assignable-workers', auth, async (req, res) => {
+  try {
+    const r = await pool.query("SELECT id, name, first_name, last_name, avatar, job_type FROM store_staff WHERE store_id=$1 AND COALESCE(status,'active')='active' ORDER BY name", [req.params.sid]);
+    res.json({ workers: r.rows.map((w) => ({ id: w.id, name: fullName(w), avatar: w.avatar, job_type: w.job_type })) });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.post('/stores/:sid/orders/assign', auth, async (req, res) => {
   try {
     const sid = req.params.sid;
@@ -856,7 +888,7 @@ async function getPeriod(sid, year, month, create = true) {
 // never touched — later corrections go through adjustments.
 async function calculatePeriod(sid, year, month) {
   const period = await getPeriod(sid, year, month, true);
-  const { earnings } = await computeEarnings(sid, year, month);
+  const { earnings, counts } = await computeEarnings(sid, year, month);
   const staff = (await pool.query('SELECT id,name,first_name,last_name,job_type FROM store_staff WHERE store_id=$1', [sid])).rows;
   const byId = {}; staff.forEach((s) => { byId[s.id] = s; });
   // keep names for workers that were deleted since
@@ -871,12 +903,12 @@ async function calculatePeriod(sid, year, month) {
       const bonuses = parseFloat(ex?.bonuses) || 0, deductions = parseFloat(ex?.deductions) || 0;
       const net = money(e.fixed + e.commission + bonuses - deductions);
       await pool.query(
-        `INSERT INTO payroll_items(period_id,store_id,staff_id,worker_name,job_type,currency,fixed_amount,commission_amount,bonuses,deductions,net_amount,breakdown,status)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,'calculated')
+        `INSERT INTO payroll_items(period_id,store_id,staff_id,worker_name,job_type,currency,fixed_amount,commission_amount,bonuses,deductions,net_amount,breakdown,counts,status)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,'calculated')
          ON CONFLICT (period_id,staff_id,currency) DO UPDATE SET worker_name=EXCLUDED.worker_name, job_type=EXCLUDED.job_type, fixed_amount=EXCLUDED.fixed_amount,
-           commission_amount=EXCLUDED.commission_amount, net_amount=EXCLUDED.net_amount, breakdown=EXCLUDED.breakdown, status='calculated', updated_at=NOW()
+           commission_amount=EXCLUDED.commission_amount, net_amount=EXCLUDED.net_amount, breakdown=EXCLUDED.breakdown, counts=EXCLUDED.counts, status='calculated', calculated_at=NOW(), updated_at=NOW()
          WHERE payroll_items.locked=FALSE`,
-        [period.id, sid, staffId, fullName(w) || ex?.worker_name || '—', w.job_type || ex?.job_type || null, cur, money(e.fixed), money(e.commission), bonuses, deductions, net, JSON.stringify(e.lines)]);
+        [period.id, sid, staffId, fullName(w) || ex?.worker_name || '—', w.job_type || ex?.job_type || null, cur, money(e.fixed), money(e.commission), bonuses, deductions, net, JSON.stringify(e.lines), JSON.stringify(counts[staffId] || {})]);
     }
   }
   // drop unlocked items that no longer have any rule
@@ -954,8 +986,10 @@ router.get('/stores/:sid/payroll/items/:iid/orders', auth, async (req, res) => {
     const limit = Math.min(200, parseInt(req.query.limit) || 50), offset = Math.max(0, parseInt(req.query.offset) || 0);
     const base = `FROM worker_order_actions a LEFT JOIN orders o ON o.id=a.order_id
       WHERE a.store_id=$1 AND a.staff_id=$2 AND a.action=$3
-        AND a.created_at >= make_timestamptz($4,$5,1,0,0,0,'Africa/Algiers') AND a.created_at < make_timestamptz($4,$5,1,0,0,0,'Africa/Algiers') + INTERVAL '1 month'`;
-    const args = [req.params.sid, item.staff_id, action, period.year, period.month];
+        AND a.created_at >= make_timestamptz($4,$5,1,0,0,0,'Africa/Algiers') AND a.created_at < make_timestamptz($4,$5,1,0,0,0,'Africa/Algiers') + INTERVAL '1 month'
+        AND ($6::timestamptz IS NULL OR a.created_at <= $6::timestamptz)`;
+    // a locked line lists exactly the orders it was calculated from
+    const args = [req.params.sid, item.staff_id, action, period.year, period.month, item.locked ? (item.calculated_at || item.approved_at) : null];
     const total = (await pool.query(`SELECT COUNT(*)::int AS n ${base}`, args)).rows[0].n;
     const rows = (await pool.query(`SELECT a.order_id, a.order_number, a.created_at, o.customer_name, o.total, o.status ${base} ORDER BY a.created_at LIMIT ${limit} OFFSET ${offset}`, args)).rows;
     res.json({ action, total, orders: rows });
@@ -1055,7 +1089,7 @@ router.get('/stores/:sid/payroll/export', auth, async (req, res) => {
     const head = ['Worker', 'Job', 'Currency', 'Fixed salary', 'Confirmed orders', 'Prepared orders', 'Completed orders', 'Commission', 'Bonuses', 'Deductions', 'Adjustments', 'Net salary', 'Paid', 'Status'];
     const lines = items.map((i) => {
       const bd = Array.isArray(i.breakdown) ? i.breakdown : [];
-      const n = (a) => bd.filter((l) => l.action === a).reduce((s, l) => s + (l.count || 0), 0);
+      const n = (a) => (i.counts && i.counts[a] != null ? i.counts[a] : bd.filter((l) => l.action === a).reduce((s, l) => s + (l.count || 0), 0));
       return [i.worker_name, i.job_type, i.currency, i.fixed_amount, n('confirmed'), n('prepared'), n('completed'), i.commission_amount, i.bonuses, i.deductions, i.adjustments, money((parseFloat(i.net_amount) || 0) + (parseFloat(i.adjustments) || 0)), i.paid, i.status].map(esc).join(',');
     });
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');

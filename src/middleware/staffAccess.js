@@ -125,6 +125,7 @@ const RULES = [
   ['POST', /^\/stores\/:sid\/orders\/:oid\/log-action$/, ANY],
   ['GET', /^\/stores\/:sid\/orders\/:oid\/timeline$/, ['orders_view', 'orders_view_assigned']],
   ['POST', /^\/stores\/:sid\/orders\/assign$/, ['orders_assign']],
+  ['GET', /^\/stores\/:sid\/assignable-workers$/, ['orders_assign', 'workers_view', 'workers_manage', 'staff_manage']],
   ['GET', /^\/stores\/:sid\/(workers(\/:wid)?|job-types|worker-roles)$/, ['workers_view', 'workers_manage', 'staff_manage']],
   ['PUT', /^\/stores\/:sid\/workers\/:wid\/compensation$/, ['workers_manage', 'staff_manage', 'payroll_manage']],
   ['*', /^\/stores\/:sid\/(workers|job-types|worker-roles)/, ['workers_manage', 'staff_manage']],

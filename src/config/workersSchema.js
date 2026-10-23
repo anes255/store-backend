@@ -140,6 +140,10 @@ const STATEMENTS = [
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(period_id, staff_id, currency))`,
   "CREATE INDEX IF NOT EXISTS idx_pi_store_staff ON payroll_items(store_id, staff_id)",
+  // how many of each paid action the worker did that month (also when no rule pays for it)
+  "ALTER TABLE payroll_items ADD COLUMN IF NOT EXISTS counts JSONB DEFAULT '{}'::jsonb",
+  // when the line was last calculated — its "View orders" list stops there once locked
+  "ALTER TABLE payroll_items ADD COLUMN IF NOT EXISTS calculated_at TIMESTAMPTZ DEFAULT NOW()",
 
   `CREATE TABLE IF NOT EXISTS payroll_adjustments(
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
