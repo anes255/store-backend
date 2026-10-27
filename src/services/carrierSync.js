@@ -4,9 +4,10 @@ const { carrierRequest, carrierCreateOrder, extractStatus, detectCarrier } = req
 const pick = (o, ...keys) => { for (const k of keys) { if (o && o[k] != null && o[k] !== '') return o[k]; } return null; };
 const mapStatus = (s) => {
   const t = String(s || '').toLowerCase().replace(/[_-]/g, ' ');
+  // Returns first: "retour … livré au vendeur" is a return, not a delivery.
+  if (/retour|return|مرتجع/.test(t)) return 'returned';
   if (/livr[éeè]|deliver|تم التسليم|^livred$|encaiss|paye/.test(t)) return 'delivered';
   if (/exp[éeè]di|ship|في الطريق|en livraison|dispatched.to.driver|attempt.delivery/.test(t)) return 'shipped';
-  if (/retour|return|مرتجع/.test(t)) return 'returned';
   if (/annul|cancel|ملغ/.test(t)) return 'cancelled';
   if (/transit|center|en cours|vers hub|en hub|vers wilaya|en ramassage|picked/.test(t)) return 'shipped';
   if (/r[ée]ception|prepar|pret a expedier|pret a preparer|stock en preparation|accepted.by.carrier|order.information.received/.test(t)) return 'preparing';
@@ -14,8 +15,15 @@ const mapStatus = (s) => {
   return 'shipped';
 };
 
+// SET fragment for a status reported by the carrier ($n = our mapped status).
+// Delivered / returned orders never move back to an earlier step, and
+// cancelled orders are left alone; delivered_at is stamped on delivery.
+const carrierStatusSql = (n) => `status=CASE WHEN status='cancelled' OR (status IN ('delivered','returned') AND ${n}::text NOT IN ('delivered','returned')) THEN status ELSE ${n}::text END,
+  delivered_at=CASE WHEN ${n}::text='delivered' AND status IS DISTINCT FROM 'delivered' THEN NOW() ELSE delivered_at END`;
+
 async function ensureSyncCols() {
   for (const sql of [
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ",
     "ALTER TABLE delivery_companies ADD COLUMN IF NOT EXISTS auto_sync_enabled BOOLEAN DEFAULT FALSE",
     "ALTER TABLE delivery_companies ADD COLUMN IF NOT EXISTS auto_dispatch_enabled BOOLEAN DEFAULT FALSE",
     "ALTER TABLE delivery_companies ADD COLUMN IF NOT EXISTS last_synced_at TIMESTAMPTZ",
@@ -78,7 +86,7 @@ async function syncCarrierOrders(storeId, dc) {
 
     if (existing) {
       await pool.query(
-        `UPDATE orders SET status=$1,tracking_status=$2,delivery_company_id=$3,carrier_data=$4::jsonb,
+        `UPDATE orders SET ${carrierStatusSql('$1')},tracking_status=$2,delivery_company_id=$3,carrier_data=$4::jsonb,
          tracking_number=COALESCE(tracking_number,$5),external_id=COALESCE(external_id,$6),
          customer_name=COALESCE(NULLIF(customer_name,''),NULLIF($8,''),customer_name),
          customer_phone=COALESCE(NULLIF(customer_phone,''),NULLIF($9,''),customer_phone),
@@ -127,7 +135,7 @@ async function updateTracking(storeId, order, dc) {
     const normalized = extractedStatus.toLowerCase().replace(/\s+/g, '_');
     const ourStatus = mapStatus(extractedStatus);
     await pool.query(
-      'UPDATE orders SET tracking_status=$1,status=$2,carrier_data=$3::jsonb,tracking_updated_at=NOW(),updated_at=NOW() WHERE id=$4',
+      `UPDATE orders SET tracking_status=$1,${carrierStatusSql('$2')},carrier_data=$3::jsonb,tracking_updated_at=NOW(),updated_at=NOW() WHERE id=$4`,
       [normalized, ourStatus, JSON.stringify(data), order.id]
     );
     // Tell the owner when the courier moves the order to a new status.
@@ -255,4 +263,4 @@ async function runFullSync() {
   }
 }
 
-module.exports = { runFullSync, syncCarrierOrders, updateTracking, autoDispatchOrder, ensureSyncCols };
+module.exports = { runFullSync, syncCarrierOrders, updateTracking, autoDispatchOrder, ensureSyncCols, mapStatus, carrierStatusSql };

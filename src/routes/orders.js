@@ -705,7 +705,17 @@ router.get('/stores/:sid/track/:trackingNumber',authMiddleware(['store_owner','s
 
           const normalizedStatus=(extractedStatus||'').toLowerCase().replace(/\s+/g,'_');
           if(extractedStatus){
-            await pool.query('UPDATE orders SET tracking_status=$1,tracking_updated_at=NOW() WHERE id=$2',[normalizedStatus,o.id]);
+            // A delivered or returned parcel moves the order itself to that status.
+            const{mapStatus,carrierStatusSql}=require('../services/carrierSync');
+            const ours=mapStatus(extractedStatus);
+            if(ours==='delivered'||ours==='returned'){
+              const r=await pool.query(`UPDATE orders SET tracking_status=$1,${carrierStatusSql('$3')},tracking_updated_at=NOW(),updated_at=NOW() WHERE id=$2 RETURNING status`,[normalizedStatus,o.id,ours]);
+              if(r.rows[0]?.status===ours&&o.status!==ours){
+                try{const{notifyStore,statusLabel}=require('../services/notify');notifyStore(req.params.sid,{type:'status',title:`Order #${o.order_number} → ${statusLabel(ours)}`,message:o.customer_name||'',link:'/dashboard/orders?highlight='+o.id});}catch{}
+              }
+            }else{
+              await pool.query('UPDATE orders SET tracking_status=$1,tracking_updated_at=NOW() WHERE id=$2',[normalizedStatus,o.id]);
+            }
           }
 
           return res.json({
@@ -890,16 +900,7 @@ router.post('/stores/:sid/delivery-companies/:did/sync',authMiddleware(['store_o
 
     // Map carrier-specific fields → our order shape.
     const pick=(o,...keys)=>{for(const k of keys){if(o&&o[k]!=null&&o[k]!=='')return o[k];}return null;};
-    const mapStatus=(s)=>{
-      const t=String(s||'').toLowerCase();
-      if(/livr[éeè]|deliver|تم التسليم/.test(t))return 'delivered';
-      if(/exp[éeè]di|ship|في الطريق/.test(t))return 'shipped';
-      if(/retour|return|مرتجع/.test(t))return 'returned';
-      if(/annul|cancel|ملغ/.test(t))return 'cancelled';
-      if(/transit|center|en cours/.test(t))return 'shipped';
-      if(/r[ée]ception|prepar/.test(t))return 'preparing';
-      return 'shipped';
-    };
+    const{mapStatus,carrierStatusSql}=require('../services/carrierSync');
     let inserted=0,updated=0;
     for(const p of list){
       const tracking=String(pick(p,'tracking','tracking_number','code','Tracking','parcel_id','id','orderId')||'').trim();
@@ -920,7 +921,7 @@ router.post('/stores/:sid/delivery-companies/:did/sync',authMiddleware(['store_o
       const existing=(await pool.query('SELECT id FROM orders WHERE store_id=$1 AND (tracking_number=$2 OR external_id=$3) LIMIT 1',[req.params.sid,tracking,externalId])).rows[0];
       if(existing){
         await pool.query(
-          `UPDATE orders SET status=$1,tracking_status=$2,delivery_company_id=$3,
+          `UPDATE orders SET ${carrierStatusSql('$1')},tracking_status=$2,delivery_company_id=$3,
            tracking_number=COALESCE(tracking_number,$4),external_id=COALESCE(external_id,$5),updated_at=NOW() WHERE id=$6`,
           [ourStatus,stRaw||null,dc.id,tracking,externalId,existing.id]
         );

@@ -94,14 +94,16 @@ app.all(['/api/webhook/carrier/:storeId/:carrierId','/api/webhook/carrier/:store
     }
     if(!tracking)return res.status(400).json({error:'Missing tracking'});
     const mapSt=(s)=>{const t=String(s||'').toLowerCase().replace(/\s+/g,'_');
+      // Returns first: "retour … livré" is a return, not a delivery.
+      if(/retour|return|suspendu/.test(t))return'returned';
       if(/livr[éeè]|deliver|^livred$/.test(t))return'delivered';
       if(/encaiss|^payed$|paiement_pret|paiement_archive/.test(t))return'delivered';
       if(/exp[éeè]di|ship|picked|dispatched|transit|attempt|en_livraison|vers_wilaya|vers_hub|en_hub|en_preparation|ramassage/.test(t))return'shipped';
       if(/received_by_carrier|accepted_by_carrier|pret_a_expedier|pret_a_preparer|stock_en_preparation/.test(t))return'preparing';
-      if(/retour|return|suspendu/.test(t))return'returned';
       if(/annul|cancel/.test(t))return'cancelled';
       return'shipped';};
-    await pool.query("UPDATE orders SET tracking_status=$1,status=$2,carrier_data=$3::jsonb,tracking_updated_at=NOW(),updated_at=NOW() WHERE store_id=$4 AND tracking_number=$5",
+    const{carrierStatusSql}=require('./services/carrierSync');
+    await pool.query(`UPDATE orders SET tracking_status=$1,${carrierStatusSql('$2')},carrier_data=$3::jsonb,tracking_updated_at=NOW(),updated_at=NOW() WHERE store_id=$4 AND tracking_number=$5`,
       [String(status).toLowerCase().replace(/\s+/g,'_'),mapSt(status),JSON.stringify(merged),req.params.storeId,tracking]);
     res.json({ok:true});
   }catch(e){res.status(500).json({error:e.message});}
