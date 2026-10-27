@@ -168,6 +168,7 @@ router.post('/stores/:sid/orders',authMiddleware(['store_owner','store_staff']),
       'VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *',
       [sid,num,b.customer_name,b.customer_phone,b.customer_email||null,b.shipping_address||null,b.shipping_city||null,b.shipping_wilaya||null,b.shipping_zip||null,subtotal,ship,0,total,b.payment_method||'cod',b.notes||null,b.notification_preference||'whatsapp',sType,b.status||'new_order',dcId]
     );
+    try{require('../services/orderDistribution').autoAssignNew(sid,o.rows[0].id);}catch(e){}
     for(const it of b.items){
       try{
         await pool.query(
@@ -578,7 +579,34 @@ router.post('/stores/:sid/blacklist',authMiddleware(['store_owner']),async(req,r
 router.delete('/stores/:sid/blacklist/:bid',authMiddleware(['store_owner']),async(req,res)=>{try{await pool.query('DELETE FROM blacklist WHERE id=$1 AND store_id=$2',[req.params.bid,req.params.sid]);res.json({ok:true});}catch(e){res.status(500).json({error:e.message});}});
 
 // ═══ EXPENSES CRUD ═══
-router.get('/stores/:sid/expenses',authMiddleware(['store_owner']),async(req,res)=>{try{res.json((await pool.query('SELECT * FROM expenses WHERE store_id=$1 ORDER BY date DESC',[req.params.sid])).rows);}catch(e){res.json([]);}});
+router.get('/stores/:sid/expenses',authMiddleware(['store_owner']),async(req,res)=>{try{
+  const rows=(await pool.query('SELECT * FROM expenses WHERE store_id=$1 ORDER BY date DESC',[req.params.sid])).rows;
+  // Worker salaries paid through Payroll appear as read-only "Salaries"
+  // entries (one per recorded payment) — only for people who may see payroll.
+  if(!req.staffPerms||req.staffPerms.has('payroll_view')){
+    try{
+      let cfg=(await pool.query('SELECT config FROM stores WHERE id=$1',[req.params.sid])).rows[0]?.config||{};
+      if(typeof cfg==='string'){try{cfg=JSON.parse(cfg);}catch{cfg={};}}
+      const fx=cfg.fx_rates||{};
+      const pays=(await pool.query(`SELECT pp.id,pp.amount,pp.currency,pp.method,pp.reference,pp.paid_at,pp.notes,pp.created_by,pp.created_at,
+          pi.id AS item_id,pi.staff_id,pi.worker_name,pi.job_type,pi.net_amount,pi.fixed_amount,pi.commission_amount,pi.bonuses,pi.deductions,pi.status AS item_status,
+          per.year,per.month
+        FROM payroll_payments pp JOIN payroll_items pi ON pi.id=pp.item_id JOIN payroll_periods per ON per.id=pi.period_id
+        WHERE pp.store_id=$1 ORDER BY pp.paid_at DESC,pp.created_at DESC`,[req.params.sid])).rows;
+      for(const p of pays){
+        const amt=parseFloat(p.amount)||0;
+        const rate=p.currency==='DZD'?1:(parseFloat(fx[p.currency])||null);
+        rows.push({id:'payroll_'+p.id,source:'payroll',category:'Salaries',status:'Paid',
+          description:`${p.worker_name||''} — ${String(p.month).padStart(2,'0')}/${p.year}`,
+          date:p.paid_at,amount:rate?Math.round(amt*rate*100)/100:null,original_amount:amt,currency:p.currency,fx_rate:rate,
+          payroll:{item_id:p.item_id,worker_id:p.staff_id,worker_name:p.worker_name,job_type:p.job_type,year:p.year,month:p.month,method:p.method,reference:p.reference,notes:p.notes,paid_by:p.created_by,recorded_at:p.created_at,
+            net_amount:p.net_amount,fixed_amount:p.fixed_amount,commission_amount:p.commission_amount,bonuses:p.bonuses,deductions:p.deductions,item_status:p.item_status}});
+      }
+      rows.sort((a,b)=>new Date(b.date)-new Date(a.date));
+    }catch(e){console.error('[expenses payroll]',e.message);}
+  }
+  res.json(rows);
+}catch(e){res.json([]);}});
 router.post('/stores/:sid/expenses',authMiddleware(['store_owner']),async(req,res)=>{try{const{description,category,amount,date,status}=req.body;if(!description||!amount)return res.status(400).json({error:'Description and amount required'});const r=await pool.query('INSERT INTO expenses(store_id,description,category,amount,date,status) VALUES($1,$2,$3,$4,$5,$6) RETURNING *',[req.params.sid,description,category||'Other',amount,date||new Date().toISOString().split('T')[0],status||'Paid']);res.status(201).json(r.rows[0]);}catch(e){res.status(500).json({error:e.message});}});
 router.put('/stores/:sid/expenses/:eid',authMiddleware(['store_owner']),async(req,res)=>{try{const{description,category,amount,date,status}=req.body;const r=await pool.query('UPDATE expenses SET description=COALESCE($1,description),category=COALESCE($2,category),amount=COALESCE($3,amount),date=COALESCE($4,date),status=COALESCE($5,status) WHERE id=$6 AND store_id=$7 RETURNING *',[description,category,amount,date,status,req.params.eid,req.params.sid]);res.json(r.rows[0]);}catch(e){res.status(500).json({error:e.message});}});
 router.delete('/stores/:sid/expenses/:eid',authMiddleware(['store_owner']),async(req,res)=>{try{await pool.query('DELETE FROM expenses WHERE id=$1 AND store_id=$2',[req.params.eid,req.params.sid]);res.json({ok:true});}catch(e){res.status(500).json({error:e.message});}});

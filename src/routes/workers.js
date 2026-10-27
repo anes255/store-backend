@@ -220,20 +220,56 @@ async function createToken(row, kind, hours) {
 const LINK_MSG = {
   en: {
     inviteSubject: (st) => `Welcome to ${st} on MarketDz`, resetSubject: () => 'Reset your MarketDz worker password',
-    invite: (st, role, login, link) => `Welcome to MarketDz!\n\nStore: ${st}\nRole: ${role}\nLogin: ${login}\n\nSet your password and log in: ${link}\n\nThis link expires in 7 days.`,
-    reset: (st, link) => `A password reset was requested for your worker account at ${st}.\n\nSet a new password: ${link}\n\nThis link expires in 1 hour. If you did not ask for this, ignore this message.`,
+    invite: (st, role, login, link) => `Welcome to MarketDz!
+\n
+\nStore: ${st}
+\nRole: ${role}
+\nLogin: ${login}
+\n
+\nSet your password and log in: ${link}
+\n
+\nThis link expires in 7 days.`,
+    reset: (st, link) => `A password reset was requested for your worker account at ${st}.
+\n
+\nSet a new password: ${link}
+\n
+\nThis link expires in 1 hour. If you did not ask for this, ignore this message.`,
     inviteBtn: 'Set Password &amp; Login', resetBtn: 'Set a new password', staff: 'Staff',
   },
   fr: {
     inviteSubject: (st) => `Bienvenue chez ${st} sur MarketDz`, resetSubject: () => 'Réinitialisez votre mot de passe MarketDz',
-    invite: (st, role, login, link) => `Bienvenue sur MarketDz !\n\nBoutique : ${st}\nRôle : ${role}\nIdentifiant : ${login}\n\nDéfinissez votre mot de passe et connectez-vous : ${link}\n\nCe lien expire dans 7 jours.`,
-    reset: (st, link) => `Une réinitialisation du mot de passe a été demandée pour votre compte chez ${st}.\n\nDéfinissez un nouveau mot de passe : ${link}\n\nCe lien expire dans 1 heure. Si vous n’êtes pas à l’origine de cette demande, ignorez ce message.`,
+    invite: (st, role, login, link) => `Bienvenue sur MarketDz !
+\n
+\nBoutique : ${st}
+\nRôle : ${role}
+\nIdentifiant : ${login}
+\n
+\nDéfinissez votre mot de passe et connectez-vous : ${link}
+\n
+\nCe lien expire dans 7 jours.`,
+    reset: (st, link) => `Une réinitialisation du mot de passe a été demandée pour votre compte chez ${st}.
+\n
+\nDéfinissez un nouveau mot de passe : ${link}
+\n
+\nCe lien expire dans 1 heure. Si vous n’êtes pas à l’origine de cette demande, ignorez ce message.`,
     inviteBtn: 'Définir le mot de passe et se connecter', resetBtn: 'Définir un nouveau mot de passe', staff: 'Équipe',
   },
   ar: {
     inviteSubject: (st) => `مرحبًا بك في ${st} على MarketDz`, resetSubject: () => 'إعادة تعيين كلمة مرور حسابك على MarketDz',
-    invite: (st, role, login, link) => `مرحبًا بك في MarketDz!\n\nالمتجر: ${st}\nالدور: ${role}\nاسم الدخول: ${login}\n\nعيّن كلمة المرور وسجّل الدخول: ${link}\n\nينتهي هذا الرابط خلال 7 أيام.`,
-    reset: (st, link) => `تم طلب إعادة تعيين كلمة المرور لحسابك في ${st}.\n\nعيّن كلمة مرور جديدة: ${link}\n\nينتهي هذا الرابط خلال ساعة واحدة. إذا لم تطلب ذلك فتجاهل هذه الرسالة.`,
+    invite: (st, role, login, link) => `مرحبًا بك في MarketDz!
+\n
+\nالمتجر: ${st}
+\nالدور: ${role}
+\nاسم الدخول: ${login}
+\n
+\nعيّن كلمة المرور وسجّل الدخول: ${link}
+\n
+\nينتهي هذا الرابط خلال 7 أيام.`,
+    reset: (st, link) => `تم طلب إعادة تعيين كلمة المرور لحسابك في ${st}.
+\n
+\nعيّن كلمة مرور جديدة: ${link}
+\n
+\nينتهي هذا الرابط خلال ساعة واحدة. إذا لم تطلب ذلك فتجاهل هذه الرسالة.`,
     inviteBtn: 'تعيين كلمة المرور وتسجيل الدخول', resetBtn: 'تعيين كلمة مرور جديدة', staff: 'موظف',
   },
 };
@@ -818,6 +854,33 @@ router.post('/stores/:sid/orders/assign', auth, async (req, res) => {
     const r = await pool.query(`UPDATE orders SET assigned_staff_id=$1, assigned_at=CASE WHEN $1::uuid IS NULL THEN NULL ELSE NOW() END WHERE store_id=$2 AND id = ANY($3::uuid[]) RETURNING id, order_number, status`, [staffId, sid, ids]);
     for (const o of r.rows) await recordOrderAction({ storeId: sid, staffId, order: o, action: staffId ? 'assigned' : 'unassigned', newStatus: o.status, metadata: { by: req.user?.name || null, by_staff: req.user?.staff_id || null } });
     res.json({ ok: true, updated: r.rowCount });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Distribute unassigned new orders between workers (N each, or a total split evenly).
+router.post('/stores/:sid/orders/auto-assign', auth, async (req, res) => {
+  try {
+    const { distribute } = require('../services/orderDistribution');
+    const b = req.body || {};
+    const r = await distribute(req.params.sid, { workerIds: b.worker_ids, perWorker: b.per_worker, total: b.total, includeCallFailed: !!b.include_call_failed, actor: req.user?.name || null });
+    if (r.error) return res.status(400).json({ error: r.error });
+    res.json(r);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Automatic assignment of every new order (store setting).
+router.get('/stores/:sid/orders/auto-assign/settings', auth, async (req, res) => {
+  try { res.json(await require('../services/orderDistribution').readSettings(req.params.sid)); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+router.put('/stores/:sid/orders/auto-assign/settings', auth, async (req, res) => {
+  try {
+    const { isUuid } = require('../services/orderDistribution');
+    const b = req.body || {};
+    const cfg = await storeCfg(req.params.sid);
+    cfg.auto_assign = { enabled: !!b.enabled, worker_ids: (Array.isArray(b.worker_ids) ? b.worker_ids : []).filter(isUuid).slice(0, 200), max_open: Math.max(0, Math.min(10000, parseInt(b.max_open, 10) || 0)) };
+    await saveStoreCfg(req.params.sid, cfg);
+    await audit(req.params.sid, req, 'auto_assign_updated', 'settings', null, { after: cfg.auto_assign });
+    res.json(cfg.auto_assign);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

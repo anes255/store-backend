@@ -35,7 +35,10 @@ const authLimiter=rateLimit({windowMs:15*60*1000,max:20,standardHeaders:true,leg
 app.use(['/api/owner/login','/api/owner/register','/api/owner/register/request-otp','/api/owner/register/verify-otp','/api/owner/login/verify-2fa','/api/owner/login/resend-2fa','/api/owner/staff/login','/api/platform/login','/api/workers/login','/api/workers/forgot-password','/api/workers/reset-password','/api/owner/forgot-password','/api/platform/forgot-password'],authLimiter);
 
 // Buyer accounts and public AI endpoints (each AI call costs money).
-app.use(['/api/store/:slug/customers/login','/api/store/:slug/customers/register'],authLimiter);
+app.use(['/api/store/:slug/customers/login','/api/store/:slug/customers/register','/api/store/:slug/customers/forgot-password'],authLimiter);
+// Sending a WhatsApp code costs a message: every request counts, not just failures.
+const codeSendLimiter=rateLimit({windowMs:15*60*1000,max:5,standardHeaders:true,legacyHeaders:false,message:{error:'Too many attempts. Please try again later.'}});
+app.post('/api/store/:slug/customers/forgot-password',codeSendLimiter);
 const aiLimiter=rateLimit({windowMs:15*60*1000,max:60,standardHeaders:true,legacyHeaders:false,message:{error:'Too many requests, please slow down.'}});
 app.use(['/api/ai/translate','/api/ai/:slug/chatbot'],aiLimiter);
 

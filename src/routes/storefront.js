@@ -168,8 +168,71 @@ router.post('/:slug/customers/login',async(req,res)=>{try{const store=(await poo
   let deletionCancelled=false;if(c.deletion_scheduled_at){try{await pool.query('UPDATE customers SET deletion_scheduled_at=NULL WHERE id=$1',[c.id]);deletionCancelled=true;}catch(e){}}
   const token=generateToken({id:c.id,role:'customer',storeId:store.id,name:c.full_name});res.json({token,deletion_cancelled:deletionCancelled,customer:{id:c.id,name:c.full_name,email:c.email,phone:c.phone,address:c.address||null,city:c.city||null,wilaya:c.wilaya||null}});}catch(e){res.status(500).json({error:e.message});}});
 
+// ═══ CUSTOMER FORGOT PASSWORD (6-digit code by WhatsApp) ═══
+// Step 1 always answers the same way, so it can't be used to find out which
+// phone numbers have an account. The code goes out from the store's own
+// WhatsApp, or the platform's when the store has none connected.
+const jwt=require('jsonwebtoken');
+const CUST_RESET_MSG={
+  en:(st,c)=>`🔐 ${c}\n\nYour ${st} password reset code. It expires in 10 minutes.\nIf you didn't ask for it, ignore this message.`,
+  fr:(st,c)=>`🔐 ${c}\n\nVotre code de réinitialisation du mot de passe ${st}. Il expire dans 10 minutes.\nSi vous n'avez rien demandé, ignorez ce message.`,
+  ar:(st,c)=>`🔐 ${c}\n\nرمز إعادة تعيين كلمة المرور لحسابك في ${st}. ينتهي خلال 10 دقائق.\nإذا لم تطلبه فتجاهل هذه الرسالة.`,
+};
+router.post('/:slug/customers/forgot-password',async(req,res)=>{try{
+  const store=(await pool.query('SELECT id,store_name FROM stores WHERE slug=$1',[req.params.slug])).rows[0];
+  if(!store)return res.status(404).json({error:'Store not found'});
+  const phone=String(req.body?.phone||'').trim();
+  if(!phone)return res.status(400).json({error:'Phone required'});
+  const last9=phone.replace(/\D/g,'').slice(-9);
+  const c=last9.length===9?(await pool.query("SELECT id,phone FROM customers WHERE store_id=$1 AND RIGHT(regexp_replace(phone,'\\D','','g'),9)=$2 LIMIT 1",[store.id,last9])).rows[0]:null;
+  const{otpHash,jwtSecret}=require('../middleware/auth');
+  const code=String(require('crypto').randomInt(100000,1000000));
+  // Check WhatsApp first, so known and unknown numbers get the same answer.
+  let wa=null,senders=[];
+  try{wa=require('../services/whatsappBaileys');senders=[store.id,process.env.PLATFORM_WA_STORE_ID||'platform'].filter(sid=>wa.getStatus?.(sid)?.connected);}catch{}
+  if(!senders.length)return res.status(503).json({error:'Could not send the code by WhatsApp right now. Please try again later or contact the store.'});
+  if(c){
+    const lng=['fr','ar'].includes(req.body?.lang)?req.body.lang:'en';
+    let sent=false;
+    for(const sid of senders){try{const r=await wa.sendMessage(sid,c.phone,CUST_RESET_MSG[lng](store.store_name,code));if(r?.success){sent=true;break;}}catch(e){console.log('[customer reset] whatsapp:',e.message);}}
+    if(!sent)return res.status(503).json({error:'Could not send the code by WhatsApp right now. Please try again later or contact the store.'});
+  }
+  const otp_token=jwt.sign({purpose:'customer_reset',store_id:store.id,customer_id:c?.id||null,otpHash:otpHash(code)},jwtSecret,{expiresIn:'10m'});
+  res.json({otp_token,masked:'••••••'+last9.slice(-3)});
+}catch(e){console.error('[customer forgot]',e.message);res.status(500).json({error:'Internal server error'});}});
+
+router.post('/:slug/customers/forgot-password/verify',async(req,res)=>{try{
+  const{otp_token,code}=req.body||{};
+  if(!otp_token||!code)return res.status(400).json({error:'Token and code required'});
+  const{otpMatch,jwtSecret}=require('../middleware/auth');
+  let p;try{p=jwt.verify(otp_token,jwtSecret);}catch{return res.status(401).json({error:'Code expired. Request a new one.'});}
+  if(p.purpose!=='customer_reset'||!p.customer_id||!otpMatch(code,p.otpHash))return res.status(401).json({error:'Invalid code'});
+  const reset_token=jwt.sign({purpose:'customer_do_reset',store_id:p.store_id,customer_id:p.customer_id},jwtSecret,{expiresIn:'10m'});
+  res.json({reset_token});
+}catch(e){res.status(500).json({error:'Internal server error'});}});
+
+router.post('/:slug/customers/forgot-password/reset',async(req,res)=>{try{
+  const{reset_token,new_password}=req.body||{};
+  if(!reset_token||!new_password)return res.status(400).json({error:'Token and new password required'});
+  if(String(new_password).length<6)return res.status(400).json({error:'Password must be at least 6 characters'});
+  const{jwtSecret}=require('../middleware/auth');
+  let p;try{p=jwt.verify(reset_token,jwtSecret);}catch{return res.status(401).json({error:'Reset expired. Start over.'});}
+  if(p.purpose!=='customer_do_reset')return res.status(401).json({error:'Invalid token'});
+  const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];
+  if(!store||store.id!==p.store_id)return res.status(401).json({error:'Invalid token'});
+  const hash=await bcrypt.hash(String(new_password),12);
+  const r=await pool.query('UPDATE customers SET password_hash=$1 WHERE id=$2 AND store_id=$3 RETURNING id',[hash,p.customer_id,store.id]);
+  if(!r.rows.length)return res.status(404).json({error:'Account not found'});
+  res.json({ok:true});
+}catch(e){res.status(500).json({error:'Internal server error'});}});
+
+let _custExtrasReady=false;
+async function ensureCustomerExtras(){
+  if(_custExtrasReady)return;
+  try{await pool.query("ALTER TABLE customers ADD COLUMN IF NOT EXISTS extra_phones JSONB DEFAULT '[]'::jsonb");await pool.query("ALTER TABLE customers ADD COLUMN IF NOT EXISTS saved_addresses JSONB DEFAULT '[]'::jsonb");_custExtrasReady=true;}catch(e){}
+}
 // Customer profile
-router.get('/:slug/customers/profile',authMiddleware([]),async(req,res)=>{try{const c=(await pool.query('SELECT * FROM customers WHERE id=$1',[req.user.id])).rows[0];if(!c)return res.status(403).json({error:'Not a customer account'});const orders=(await pool.query('SELECT * FROM orders WHERE customer_id=$1 ORDER BY created_at DESC',[req.user.id])).rows;let storeCfg2={};try{let _r2=(await pool.query('SELECT config FROM stores WHERE slug=$1',[req.params.slug])).rows[0]?.config||{};if(typeof _r2==='string'){try{_r2=JSON.parse(_r2);}catch{_r2={};}}storeCfg2=_r2;}catch(e){}
+router.get('/:slug/customers/profile',authMiddleware([]),async(req,res)=>{try{await ensureCustomerExtras();const c=(await pool.query('SELECT * FROM customers WHERE id=$1',[req.user.id])).rows[0];if(!c)return res.status(403).json({error:'Not a customer account'});const orders=(await pool.query('SELECT * FROM orders WHERE customer_id=$1 ORDER BY created_at DESC',[req.user.id])).rows;let storeCfg2={};try{let _r2=(await pool.query('SELECT config FROM stores WHERE slug=$1',[req.params.slug])).rows[0]?.config||{};if(typeof _r2==='string'){try{_r2=JSON.parse(_r2);}catch{_r2={};}}storeCfg2=_r2;}catch(e){}
   // Attach order_items (with product name, image, variant, quantity, prices)
   // so the buyer's "My Orders" list can show full product details per line.
   const orderIds=orders.map(o=>o.id);
@@ -199,7 +262,7 @@ router.get('/:slug/customers/profile',authMiddleware([]),async(req,res)=>{try{co
       }
     }catch(e){}
   }
-  res.json({...c,name:c.full_name,orders:orders.map(o=>({...o,order_number:formatOrderNumber(o.order_number,storeCfg2),discount_amount:o.discount,items:itemsByOrder[o.id]||[]}))});}catch(e){res.status(500).json({error:e.message});}});
+  res.json({...c,password_hash:undefined,name:c.full_name,orders:orders.map(o=>({...o,order_number:formatOrderNumber(o.order_number,storeCfg2),discount_amount:o.discount,items:itemsByOrder[o.id]||[]}))});}catch(e){res.status(500).json({error:e.message});}});
 // Schedule the signed-in customer's account for deletion. Like store deletion it
 // has a cooldown: the account is purged COOLDOWN_DAYS later by the
 // runCustomerPurge job (orders are kept for the store, detached from the
@@ -230,6 +293,20 @@ router.put('/:slug/customers/password',authMiddleware([]),async(req,res)=>{try{
 router.put('/:slug/customers/profile',authMiddleware([]),async(req,res)=>{try{const exists=(await pool.query('SELECT 1 FROM customers WHERE id=$1',[req.user.id])).rows[0];if(!exists)return res.status(403).json({error:'Not a customer account'});const b=req.body||{};
   // Make sure the profile_picture column exists (older databases may not have it).
   try{await pool.query('ALTER TABLE customers ADD COLUMN IF NOT EXISTS profile_picture TEXT');}catch(e){}
+  await ensureCustomerExtras();
+  // Extra phone numbers and saved addresses (besides the main ones).
+  let extraPhones,savedAddresses;
+  if(Array.isArray(b.extra_phones)){
+    const norm=(v)=>String(v||'').replace(/[\s.-]/g,'');
+    extraPhones=[...new Set(b.extra_phones.map(norm).filter(Boolean))].filter(v=>v!==norm(b.phone)).slice(0,5);
+    if(extraPhones.some(v=>!/^(0[567]\d{8}|\+?213[567]\d{8})$/.test(v)))return res.status(400).json({error:'Please enter a valid Algerian mobile number (e.g. 0555123456)'});
+  }
+  if(Array.isArray(b.saved_addresses)){
+    const cl=(v,n)=>String(v||'').trim().slice(0,n);
+    savedAddresses=b.saved_addresses.map(a=>({label:cl(a?.label,60),wilaya:cl(a?.wilaya,80),city:cl(a?.city,120),address:cl(a?.address,300)})).filter(a=>a.wilaya||a.city||a.address).slice(0,10);
+  }
+  if(extraPhones)await pool.query('UPDATE customers SET extra_phones=$1::jsonb WHERE id=$2',[JSON.stringify(extraPhones),req.user.id]);
+  if(savedAddresses)await pool.query('UPDATE customers SET saved_addresses=$1::jsonb WHERE id=$2',[JSON.stringify(savedAddresses),req.user.id]);
   if(b.phone&&!/^(0[567]\d{8}|\+?213[567]\d{8})$/.test(String(b.phone).replace(/[\s.-]/g,'')))return res.status(400).json({error:'Please enter a valid Algerian mobile number (e.g. 0555123456)'});
   // Phone change dedup: block if phone collides with an admin account or another customer
   if(b.phone){
@@ -241,7 +318,7 @@ router.put('/:slug/customers/profile',authMiddleware([]),async(req,res)=>{try{co
     if(custDup.rows.length)return res.status(409).json({error:'This phone number is already in use by another account.'});
   }
   await pool.query('UPDATE customers SET full_name=COALESCE($1,full_name),email=$2,phone=COALESCE($3,phone),address=$4,city=$5,wilaya=$6,profile_picture=COALESCE($7,profile_picture) WHERE id=$8',[b.name||null,b.email||null,b.phone||null,b.address||null,b.city||null,b.wilaya||null,b.profile_picture||null,req.user.id]);
-  const c=(await pool.query('SELECT * FROM customers WHERE id=$1',[req.user.id])).rows[0];res.json({...c,name:c.full_name});}catch(e){res.status(500).json({error:e.message});}});
+  const c=(await pool.query('SELECT * FROM customers WHERE id=$1',[req.user.id])).rows[0];res.json({...c,password_hash:undefined,name:c.full_name});}catch(e){res.status(500).json({error:e.message});}});
 
 // Checkout
 // Store-wide coupons (Offers → Coupons): each is a percentage OR a fixed
@@ -310,6 +387,7 @@ router.post('/:slug/orders',async(req,res)=>{try{let offerFreeShip=false;const s
   const total=subtotal+ship-discount;const num=parseInt((await pool.query('SELECT COALESCE(MAX(order_number),0)+1 as n FROM orders WHERE store_id=$1',[sid])).rows[0].n);const prefDcId=delivery_company_id||null;
   const initialStatus=(pm==='ccp'||pm==='baridimob')?'pending_payment':'new_order';
   const o=await pool.query('INSERT INTO orders(store_id,customer_id,order_number,customer_name,customer_phone,customer_email,shipping_address,shipping_city,shipping_wilaya,shipping_zip,subtotal,shipping_cost,discount,total,payment_method,notes,notification_preference,shipping_type,preferred_delivery_company_id,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING *',[sid,customer_id||null,num,customer_name,customer_phone,customer_email||null,shipping_address,shipping_city||null,shipping_wilaya||null,shipping_zip||null,subtotal,ship,discount,total,payment_method||'cod',notes||null,notification_preference||'whatsapp',sType,prefDcId,initialStatus]);try{await pool.query("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS weight NUMERIC DEFAULT 0");}catch(e){}for(const it of oi){await pool.query('INSERT INTO order_items(order_id,product_id,product_name,product_image,variant_info,quantity,unit_price,total_price,weight) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',[o.rows[0].id,it.product_id,it.product_name,it.product_image,it.variant_info,it.quantity,it.unit_price,it.total_price,it.weight||0]);}// Auto-add or update customer record so every buyer shows in the customers page.
+  try{require('../services/orderDistribution').autoAssignNew(store.id,o.rows[0].id);}catch(e){}
 // Registered buyers already have a row; guest checkouts get one created here.
 let custId = customer_id || null;
 if (custId) {
