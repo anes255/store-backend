@@ -1,4 +1,5 @@
 const express=require('express'),router=express.Router(),pool=require('../config/db'),{authMiddleware,generateToken}=require('../middleware/auth'),bcrypt=require('bcryptjs');
+const {imgUrl,firstImg}=require('../utils/images');
 
 // ── One-time schema self-heal + performance indexes ──
 // Previously every admin GET ran several ALTER TABLE statements on each request,
@@ -259,8 +260,8 @@ router.get('/orders',authMiddleware(['platform_admin']),async(req,res)=>{try{
     try{
       const ir=await pool.query("SELECT oi.order_id,oi.product_id,oi.product_name,oi.product_image,oi.variant_info,oi.quantity,oi.unit_price,oi.total_price,p.images AS p_images FROM order_items oi LEFT JOIN products p ON p.id=oi.product_id WHERE oi.order_id=ANY($1::uuid[])",[ids]);
       for(const it of ir.rows){
-        let img=it.product_image||null;
-        if(!img){try{const imgs=Array.isArray(it.p_images)?it.p_images:(typeof it.p_images==='string'?JSON.parse(it.p_images||'[]'):[]);img=imgs[0]||null;}catch{}}
+        let img=imgUrl(it.product_image);
+        if(!img){img=firstImg(it.p_images);}
         (itemsByOrder[it.order_id]=itemsByOrder[it.order_id]||[]).push({product_id:it.product_id,product_name:it.product_name,variant_info:it.variant_info,quantity:it.quantity,price:it.unit_price,total_price:it.total_price,image:img});
       }
     }catch(e){console.error('[platform orders items]',e.message);}

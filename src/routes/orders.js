@@ -1,4 +1,5 @@
 const express=require('express'),router=express.Router(),pool=require('../config/db'),{authMiddleware}=require('../middleware/auth');
+const {imgUrl,firstImg}=require('../utils/images');
 const messaging=require('../services/messaging');
 const{carrierRequest,carrierCreateOrder,carrierDeleteOrder,detectCarrier}=require('../services/carrierApi');
 const{autoDispatchOrder,ensureSyncCols}=require('../services/carrierSync');
@@ -93,7 +94,7 @@ router.get('/stores/:sid/orders',authMiddleware(['store_owner','store_staff']),a
     [r,c]=await Promise.all([pool.query(q2,p2),pool.query(cq2,p2)]);
   }
   const ids=r.rows.map(o=>o.id);let itemsByOrder={};let receiptByOrder={};
-  if(ids.length){try{const ir=await pool.query("SELECT oi.order_id,oi.product_id,oi.product_name,oi.product_image,oi.variant_info,oi.quantity,oi.unit_price,oi.total_price,p.images AS p_images FROM order_items oi LEFT JOIN products p ON p.id=oi.product_id WHERE oi.order_id=ANY($1::uuid[])",[ids]);for(const it of ir.rows){let img=it.product_image||null;if(!img){try{const imgs=Array.isArray(it.p_images)?it.p_images:(typeof it.p_images==='string'?JSON.parse(it.p_images||'[]'):[]);img=imgs[0]||null;}catch(e){}}(itemsByOrder[it.order_id]=itemsByOrder[it.order_id]||[]).push({product_id:it.product_id,product_name:it.product_name,variant_info:it.variant_info,quantity:it.quantity,price:it.unit_price,total_price:it.total_price,image:img});}}catch(e){console.error('[order items join]',e.message);}}
+  if(ids.length){try{const ir=await pool.query("SELECT oi.order_id,oi.product_id,oi.product_name,oi.product_image,oi.variant_info,oi.quantity,oi.unit_price,oi.total_price,p.images AS p_images FROM order_items oi LEFT JOIN products p ON p.id=oi.product_id WHERE oi.order_id=ANY($1::uuid[])",[ids]);for(const it of ir.rows){let img=imgUrl(it.product_image);if(!img){img=firstImg(it.p_images);}(itemsByOrder[it.order_id]=itemsByOrder[it.order_id]||[]).push({product_id:it.product_id,product_name:it.product_name,variant_info:it.variant_info,quantity:it.quantity,price:it.unit_price,total_price:it.total_price,image:img});}}catch(e){console.error('[order items join]',e.message);}}
   if(ids.length){try{const pr=await pool.query("SELECT DISTINCT ON (order_id) order_id,receipt_image,payment_method AS receipt_payment_method,status AS receipt_status FROM payment_receipts WHERE order_id=ANY($1::uuid[]) ORDER BY order_id,created_at DESC",[ids]);for(const rc of pr.rows){receiptByOrder[rc.order_id]=rc;}}catch(e){/* payment_receipts table may not exist yet */}}
   let companyNameMap={};const dcIds=[...new Set(r.rows.filter(o=>o.delivery_company_id).map(o=>o.delivery_company_id))];
   if(dcIds.length){try{const dcr=await pool.query('SELECT id,name FROM delivery_companies WHERE id=ANY($1::uuid[])',[dcIds]);for(const dc of dcr.rows)companyNameMap[dc.id]=dc.name;}catch(e){}}
@@ -489,7 +490,7 @@ router.get('/stores/:sid/customers/:cid/orders',authMiddleware(['store_owner','s
   const ids=r.rows.map(o=>o.id);let itemsByOrder={};
   if(ids.length){try{
     const ir=await pool.query("SELECT oi.order_id,oi.product_id,oi.product_name,oi.product_image,oi.variant_info,oi.quantity,oi.unit_price,oi.total_price,p.images AS p_images FROM order_items oi LEFT JOIN products p ON p.id=oi.product_id WHERE oi.order_id=ANY($1::uuid[])",[ids]);
-    for(const it of ir.rows){let img=it.product_image||null;if(!img){try{const imgs=Array.isArray(it.p_images)?it.p_images:(typeof it.p_images==='string'?JSON.parse(it.p_images||'[]'):[]);img=imgs[0]||null;}catch{}}(itemsByOrder[it.order_id]=itemsByOrder[it.order_id]||[]).push({product_id:it.product_id,product_name:it.product_name,variant_info:it.variant_info,quantity:it.quantity,price:it.unit_price,total_price:it.total_price,image:img});}
+    for(const it of ir.rows){let img=imgUrl(it.product_image);if(!img){img=firstImg(it.p_images);}(itemsByOrder[it.order_id]=itemsByOrder[it.order_id]||[]).push({product_id:it.product_id,product_name:it.product_name,variant_info:it.variant_info,quantity:it.quantity,price:it.unit_price,total_price:it.total_price,image:img});}
   }catch(e){console.error('[customer orders items]',e.message);}}
   res.json(r.rows.map(o=>({...o,items:itemsByOrder[o.id]||[]})));}catch(e){res.json([]);}});
 
@@ -601,6 +602,26 @@ router.get('/stores/:sid/expenses',authMiddleware(['store_owner']),async(req,res
           date:p.paid_at,amount:rate?Math.round(amt*rate*100)/100:null,original_amount:amt,currency:p.currency,fx_rate:rate,
           payroll:{item_id:p.item_id,worker_id:p.staff_id,worker_name:p.worker_name,job_type:p.job_type,year:p.year,month:p.month,method:p.method,reference:p.reference,notes:p.notes,paid_by:p.created_by,recorded_at:p.created_at,
             net_amount:p.net_amount,fixed_amount:p.fixed_amount,commission_amount:p.commission_amount,bonuses:p.bonuses,deductions:p.deductions,item_status:p.item_status}});
+      }
+      // Approved salaries not yet paid out show as a Pending cost, so payroll
+      // lands in Costs on its own from the moment it is confirmed — the owner
+      // never types a salary expense by hand.
+      const openItems=(await pool.query(`SELECT pi.id,pi.staff_id,pi.worker_name,pi.job_type,pi.currency,pi.net_amount,pi.fixed_amount,pi.commission_amount,pi.bonuses,pi.deductions,pi.status,
+          per.year,per.month,
+          COALESCE((SELECT SUM(amount) FROM payroll_payments p WHERE p.item_id=pi.id),0) AS paid,
+          COALESCE((SELECT SUM(amount) FROM payroll_adjustments a WHERE a.item_id=pi.id),0) AS adjustments
+        FROM payroll_items pi JOIN payroll_periods per ON per.id=pi.period_id
+        WHERE pi.store_id=$1 AND pi.status IN ('approved','paid')`,[req.params.sid])).rows;
+      for(const it of openItems){
+        const due=(parseFloat(it.net_amount)||0)+(parseFloat(it.adjustments)||0)-(parseFloat(it.paid)||0);
+        if(due<=0.009)continue;
+        const rate=it.currency==='DZD'?1:(parseFloat(fx[it.currency])||null);
+        rows.push({id:'payroll_due_'+it.id,source:'payroll',category:'Salaries',status:'Pending',
+          description:`${it.worker_name||''} — ${String(it.month).padStart(2,'0')}/${it.year}`,
+          date:new Date(Date.UTC(it.year,it.month-1,1)).toISOString().slice(0,10),
+          amount:rate?Math.round(due*rate*100)/100:null,original_amount:due,currency:it.currency,fx_rate:rate,
+          payroll:{item_id:it.id,worker_id:it.staff_id,worker_name:it.worker_name,job_type:it.job_type,year:it.year,month:it.month,
+            net_amount:it.net_amount,fixed_amount:it.fixed_amount,commission_amount:it.commission_amount,bonuses:it.bonuses,deductions:it.deductions,item_status:it.status,unpaid:true}});
       }
       rows.sort((a,b)=>new Date(b.date)-new Date(a.date));
     }catch(e){console.error('[expenses payroll]',e.message);}

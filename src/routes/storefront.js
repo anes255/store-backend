@@ -1,4 +1,5 @@
 const express=require('express'),router=express.Router(),bcrypt=require('bcryptjs'),pool=require('../config/db'),{authMiddleware,generateToken}=require('../middleware/auth');
+const {imgUrl,imgList,firstImg}=require('../utils/images');
 const messaging=require('../services/messaging');
 
 // Format an order number using the store's custom prefix/suffix/start.
@@ -93,6 +94,9 @@ router.get('/:slug',async(req,res)=>{try{const s=(await pool.query('SELECT * FRO
     sticky_header:cfg.sticky_header,cart_drawer:cfg.cart_drawer,trust_signals:cfg.trust_signals,show_savings:cfg.show_savings,show_stock_storefront:cfg.show_stock_storefront,low_stock_threshold:cfg.low_stock_threshold||5,
     // Checkout experience (admin toggles in Store Settings → Checkout)
     checkout_email:cfg.checkout_email===true,order_notes:cfg.order_notes===true,sticky_checkout:cfg.sticky_checkout===true,post_script:cfg.post_script||'',
+    // Which boxes the checkout form shows, and which of those are required
+    // (admin → Settings → Checkout → Checkout form fields). Absent = defaults.
+    checkout_fields:(cfg.checkout_fields&&typeof cfg.checkout_fields==='object')?cfg.checkout_fields:null,
     // Tracking pixels
     fb_pixel:cfg.fb_pixel,tiktok_pixel:cfg.tiktok_pixel,ga_id:cfg.ga_id,snap_pixel:cfg.snap_pixel,
     // Cover image
@@ -145,10 +149,10 @@ router.get('/:slug/shipping-wilayas',async(req,res)=>{try{
 }catch(e){res.json([]);}});
 
 // Products (public)
-router.get('/:slug/products',async(req,res)=>{try{const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.status(404).json({error:'Not found'});const{search,category,sort,featured}=req.query;let q='SELECT * FROM products WHERE store_id=$1 AND is_active=TRUE';const p=[store.id];if(category){p.push(category);q+=` AND category_id=$${p.length}`;}if(search){p.push(`%${search}%`);q+=` AND name ILIKE $${p.length}`;}if(featured==='true')q+=' AND is_featured=TRUE';if(sort==='price_asc')q+=' ORDER BY price ASC';else if(sort==='price_desc')q+=' ORDER BY price DESC';else q+=' ORDER BY created_at DESC';q+=' LIMIT 50';const r=await pool.query(q,p);const products=r.rows.map(x=>{let imgs=x.images;if(typeof imgs==='string')try{imgs=JSON.parse(imgs);}catch(e){imgs=[];}if(!Array.isArray(imgs))imgs=[];return{...x,name_en:x.name,name_fr:x.name,name_ar:x.name,thumbnail:imgs[0]||null,compare_at_price:x.compare_price};});const count=await pool.query('SELECT COUNT(*) FROM products WHERE store_id=$1 AND is_active=TRUE',[store.id]);res.json({products,total:parseInt(count.rows[0].count)});}catch(e){res.status(500).json({error:e.message});}});
+router.get('/:slug/products',async(req,res)=>{try{const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.status(404).json({error:'Not found'});const{search,category,sort,featured}=req.query;let q='SELECT * FROM products WHERE store_id=$1 AND is_active=TRUE';const p=[store.id];if(category){p.push(category);q+=` AND category_id=$${p.length}`;}if(search){p.push(`%${search}%`);q+=` AND name ILIKE $${p.length}`;}if(featured==='true')q+=' AND is_featured=TRUE';if(sort==='price_asc')q+=' ORDER BY price ASC';else if(sort==='price_desc')q+=' ORDER BY price DESC';else q+=' ORDER BY created_at DESC';q+=' LIMIT 50';const r=await pool.query(q,p);const products=r.rows.map(x=>({...x,images:imgList(x.images),name_en:x.name,name_fr:x.name,name_ar:x.name,thumbnail:firstImg(x.images),compare_at_price:x.compare_price}));const count=await pool.query('SELECT COUNT(*) FROM products WHERE store_id=$1 AND is_active=TRUE',[store.id]);res.json({products,total:parseInt(count.rows[0].count)});}catch(e){res.status(500).json({error:e.message});}});
 
 // Single product
-router.get('/:slug/products/:pslug',async(req,res)=>{try{const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.status(404).json({error:'Not found'});const r=await pool.query('SELECT * FROM products WHERE store_id=$1 AND slug=$2 AND is_active=TRUE',[store.id,req.params.pslug]);if(!r.rows.length)return res.status(404).json({error:'Not found'});const p=r.rows[0];let imgs=p.images;if(typeof imgs==='string')try{imgs=JSON.parse(imgs);}catch(e){imgs=[];}if(!Array.isArray(imgs))imgs=[];let category_name=null;if(p.category_id){try{category_name=(await pool.query('SELECT name FROM categories WHERE id=$1 AND store_id=$2',[p.category_id,store.id])).rows[0]?.name||null;}catch(e){}}res.json({...p,category_name,name_en:p.name,name_fr:p.name,name_ar:p.name,description_en:p.description,thumbnail:imgs[0]||null,compare_at_price:p.compare_price,allow_oversell:!!p.allow_oversell,reviews:[]});}catch(e){res.status(500).json({error:e.message});}});
+router.get('/:slug/products/:pslug',async(req,res)=>{try{const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.status(404).json({error:'Not found'});const r=await pool.query('SELECT * FROM products WHERE store_id=$1 AND slug=$2 AND is_active=TRUE',[store.id,req.params.pslug]);if(!r.rows.length)return res.status(404).json({error:'Not found'});const p=r.rows[0];let imgs=p.images;if(typeof imgs==='string')try{imgs=JSON.parse(imgs);}catch(e){imgs=[];}if(!Array.isArray(imgs))imgs=[];let category_name=null;if(p.category_id){try{category_name=(await pool.query('SELECT name FROM categories WHERE id=$1 AND store_id=$2',[p.category_id,store.id])).rows[0]?.name||null;}catch(e){}}res.json({...p,images:imgList(p.images),category_name,name_en:p.name,name_fr:p.name,name_ar:p.name,description_en:p.description,thumbnail:firstImg(p.images),compare_at_price:p.compare_price,allow_oversell:!!p.allow_oversell,reviews:[]});}catch(e){res.status(500).json({error:e.message});}});
 
 // Categories
 router.get('/:slug/categories',async(req,res)=>{try{const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.json([]);const r=await pool.query('SELECT * FROM categories WHERE store_id=$1 AND is_active=TRUE ORDER BY sort_order',[store.id]);res.json(r.rows.map(c=>({...c,name_en:c.name,name_fr:c.name,name_ar:c.name})));}catch(e){res.json([]);}});
@@ -252,11 +256,11 @@ router.get('/:slug/customers/profile',authMiddleware([]),async(req,res)=>{try{aw
           }catch(e){variantLabel=String(it.variant_info);}
         }
         // Resolve image: saved snapshot first, else look up the current product's first image
-        let img=it.product_image||null;
+        let img=imgUrl(it.product_image);
         if(!img&&it.product_images_current){
           let imgs=it.product_images_current;
           try{if(typeof imgs==='string')imgs=JSON.parse(imgs);}catch(e){imgs=[];}
-          if(Array.isArray(imgs)&&imgs.length){const f=imgs[0];img=typeof f==='string'?f:(f?.url||null);}
+          img=firstImg(imgs);
         }
         itemsByOrder[key].push({...it,product_image:img,name:it.product_name||it.product_name_current,price:it.unit_price,variant_label:variantLabel});
       }
@@ -345,7 +349,7 @@ router.post('/:slug/orders',async(req,res)=>{try{let offerFreeShip=false;const s
   if(it.variant){let vd=it.variant;if(typeof vd==='string'){try{vd=JSON.parse(vd);}catch{vd={};}}if(vd.price!=null&&parseFloat(vd.price)>0)unitPrice=parseFloat(vd.price);else if(vd.price_diff!=null)unitPrice+=parseFloat(vd.price_diff);else if(vd.additional_price!=null)unitPrice+=parseFloat(vd.additional_price);if(Array.isArray(vd.selections)){for(const sel of vd.selections){if(sel.price_diff!=null)unitPrice+=parseFloat(sel.price_diff);}}}
   // Apply quantity offer discount (e.g. "Buy 3 get 20% OFF")
   {let qOffers=p.quantity_offers;if(typeof qOffers==='string'){try{qOffers=JSON.parse(qOffers);}catch{qOffers=[];}}if(Array.isArray(qOffers)){const qMatch=qOffers.filter(qo=>parseInt(qo.quantity)>0&&it.quantity>=parseInt(qo.quantity)).sort((a,b)=>parseInt(b.quantity)-parseInt(a.quantity))[0];if(qMatch){if(qMatch.free_shipping)offerFreeShip=true;const _dv=parseFloat(qMatch.discount_value)||0;if(_dv>0){if(qMatch.discount_type==='fixed')unitPrice=Math.max(0,unitPrice-_dv);else unitPrice=Math.round(unitPrice*(1-_dv/100));}else if(qMatch.label){const _qm=String(qMatch.label).match(/(\d+(?:\.\d+)?)\s*%/);if(_qm){const _qpct=parseFloat(_qm[1]);if(_qpct>0)unitPrice=Math.round(unitPrice*(1-_qpct/100));}}}}}
-  const t=unitPrice*it.quantity;subtotal+=t;let imgs=p.images;if(typeof imgs==='string')try{imgs=JSON.parse(imgs);}catch(e){imgs=[];}if(!Array.isArray(imgs))imgs=[];oi.push({product_id:p.id,product_name:p.name,product_image:imgs[0]||null,variant_info:it.variant||null,quantity:it.quantity,unit_price:unitPrice,total_price:t,weight:(parseFloat(p.weight)||0)*(it.quantity||1)});}
+  const t=unitPrice*it.quantity;subtotal+=t;let imgs=p.images;if(typeof imgs==='string')try{imgs=JSON.parse(imgs);}catch(e){imgs=[];}if(!Array.isArray(imgs))imgs=[];oi.push({product_id:p.id,product_name:p.name,product_image:firstImg(p.images),variant_info:it.variant||null,quantity:it.quantity,unit_price:unitPrice,total_price:t,weight:(parseFloat(p.weight)||0)*(it.quantity||1)});}
   // Determine shipping cost from wilaya rates (desk vs home delivery).
   // If a delivery company is selected and that wilaya has a per-company price,
   // use that price instead of the default desk/home rate.

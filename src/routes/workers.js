@@ -560,7 +560,8 @@ router.get('/stores/:sid/workers', auth, async (req, res) => {
     const workers = rows.map((w) => ({
       ...w, full_name: fullName(w), role_name: roleName(w),
       online: !!(w.last_seen_at && Date.now() - new Date(w.last_seen_at) < 5 * 60 * 1000),
-      orders: handledBy[w.id] || 0, confirmed: counts[w.id]?.confirmed || 0, prepared: counts[w.id]?.prepared || 0, completed: counts[w.id]?.completed || 0,
+      orders: handledBy[w.id] || 0, confirmed: counts[w.id]?.confirmed || 0, prepared: counts[w.id]?.prepared || 0,
+      shipped: counts[w.id]?.shipped || 0, completed: counts[w.id]?.completed || 0,
       rules: rulesBy[w.id] || [], earnings: earnings[w.id] || {},
       last_activity: [w.last_seen_at, w.last_action_at].filter(Boolean).sort().slice(-1)[0] || null,
     }));

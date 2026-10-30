@@ -1,4 +1,5 @@
 const express=require('express'),router=express.Router(),bcrypt=require('bcryptjs'),pool=require('../config/db'),{authMiddleware,generateToken}=require('../middleware/auth'),slugify=require('slugify'),jwt=require('jsonwebtoken');
+const {imgUrl,firstImg}=require('../utils/images');
 const OTP_JWT_SECRET=require('../middleware/auth').jwtSecret;
 let _waBaileysCache;function _getWaBaileys(){if(_waBaileysCache!==undefined)return _waBaileysCache;try{_waBaileysCache=require('../services/whatsappBaileys');}catch{_waBaileysCache=null;}return _waBaileysCache;}
 const waBaileys=new Proxy({},{get(_,prop){const mod=_getWaBaileys();if(!mod){if(prop==='getStatus')return()=>({connected:false,status:'not_available'});if(prop==='sendMessage')return async()=>({success:false,reason:'WhatsApp service not available'});if(prop==='startSession'||prop==='disconnectSession'||prop==='restoreSessions')return async()=>{};return undefined;}return mod[prop];}});
@@ -317,7 +318,7 @@ router.post('/login',async(req,res)=>{try{
           console.log('[Owner Login] ✅ STAFF (no-owner path):',staff.name,'stores:',sibling.length);
           return res.json({
             token:generateToken({id:owner.id,role:'store_owner',name:staff.name,staff_id:staff.id,staff_role:staff.role,staff_role_label:staffRoleLabel,permissions:perms,scoped_store_id:sRow.id,scoped_store_ids:sibling.map(s=>s.id),sv:staff.session_version||0}),
-            owner:{id:owner.id,name:staff.name,email:staff.email,phone:staff.phone,subscription_plan:owner.subscription_plan,is_staff:true,staff_id:staff.id,staff_role:staff.role,staff_role_label:staffRoleLabel,permissions:perms,scoped_store_id:sRow.id,scoped_store_ids:sibling.map(s=>s.id),sv:staff.session_version||0},
+            owner:{id:owner.id,name:staff.name,email:staff.email,phone:staff.phone,avatar:staff.avatar||null,subscription_plan:owner.subscription_plan,is_staff:true,staff_id:staff.id,staff_role:staff.role,staff_role_label:staffRoleLabel,permissions:perms,scoped_store_id:sRow.id,scoped_store_ids:sibling.map(s=>s.id),sv:staff.session_version||0},
             stores:sibling.map(s=>({...(s.config||{}),...s,name:s.store_name,is_live:s.is_published,logo:s.logo_url,hero_title:s.hero_title,hero_subtitle:s.hero_subtitle}))
           });
         }
@@ -350,7 +351,7 @@ router.post('/login',async(req,res)=>{try{
           console.log('[Owner Login] ✅ STAFF:',staff.name,'stores:',sibling.length,'primary:',sRow.slug);
           return res.json({
             token:generateToken({id:owner.id,role:'store_owner',name:staff.name,staff_id:staff.id,staff_role:staff.role,staff_role_label:staffRoleLabel,permissions:perms,scoped_store_id:sRow.id,scoped_store_ids:sibling.map(s=>s.id),sv:staff.session_version||0}),
-            owner:{id:owner.id,name:staff.name,email:staff.email,phone:staff.phone,subscription_plan:owner.subscription_plan,is_staff:true,staff_id:staff.id,staff_role:staff.role,staff_role_label:staffRoleLabel,permissions:perms,scoped_store_id:sRow.id,scoped_store_ids:sibling.map(s=>s.id),sv:staff.session_version||0},
+            owner:{id:owner.id,name:staff.name,email:staff.email,phone:staff.phone,avatar:staff.avatar||null,subscription_plan:owner.subscription_plan,is_staff:true,staff_id:staff.id,staff_role:staff.role,staff_role_label:staffRoleLabel,permissions:perms,scoped_store_id:sRow.id,scoped_store_ids:sibling.map(s=>s.id),sv:staff.session_version||0},
             stores:sibling.map(s=>({...(s.config||{}),...s,name:s.store_name,is_live:s.is_published,logo:s.logo_url,hero_title:s.hero_title,hero_subtitle:s.hero_subtitle}))
           });
         }
@@ -541,7 +542,9 @@ function limitDashboardForStaff(perms,d){
 // on load so staff always work with their current permissions.
 router.get('/stores/:sid/my-access',authMiddleware(['store_owner']),async(req,res)=>{
   if(!req.staffPerms)return res.json({is_staff:false,permissions:null});
-  res.json({is_staff:true,permissions:[...req.staffPerms]});
+  let avatar=null;
+  try{avatar=(await pool.query('SELECT avatar FROM store_staff WHERE id=$1',[req.user.staff_id])).rows[0]?.avatar||null;}catch(e){}
+  res.json({is_staff:true,permissions:[...req.staffPerms],avatar});
 });
 router.get('/stores/:sid/dashboard',authMiddleware(['store_owner']),async(req,res)=>{try{const sid=req.params.sid;const store=await pool.query('SELECT * FROM stores WHERE id=$1 AND owner_id=$2',[sid,req.user.id]);if(!store.rows.length)return res.status(404).json({error:'Not found'});const full=await loadStore(sid);
 // Every figure uses the same definition of an order: not deleted, and not an
@@ -586,7 +589,7 @@ try{
     avgOrderValue:{current:oc?rc/oc:0,previous:op?rp/op:0},
   };
 }catch(e){}
-let itemsByOrder={};try{const ids=ro.map(o=>o.id);if(ids.length){const ir=await pool.query("SELECT oi.order_id,oi.product_id,oi.product_name,oi.product_image,oi.quantity,oi.unit_price,oi.total_price,p.images AS p_images FROM order_items oi LEFT JOIN products p ON p.id=oi.product_id WHERE oi.order_id=ANY($1::uuid[])",[ids]);for(const it of ir.rows){let img=it.product_image||null;if(!img){try{const imgs=Array.isArray(it.p_images)?it.p_images:(typeof it.p_images==='string'?JSON.parse(it.p_images||'[]'):[]);img=imgs[0]||null;}catch(e){}}(itemsByOrder[it.order_id]=itemsByOrder[it.order_id]||[]).push({product_id:it.product_id,product_name:it.product_name,quantity:it.quantity,price:it.unit_price,total_price:it.total_price,image:img});}}}catch(e){console.error('[dashboard items]',e.message);}
+let itemsByOrder={};try{const ids=ro.map(o=>o.id);if(ids.length){const ir=await pool.query("SELECT oi.order_id,oi.product_id,oi.product_name,oi.product_image,oi.quantity,oi.unit_price,oi.total_price,p.images AS p_images FROM order_items oi LEFT JOIN products p ON p.id=oi.product_id WHERE oi.order_id=ANY($1::uuid[])",[ids]);for(const it of ir.rows){let img=imgUrl(it.product_image);if(!img){img=firstImg(it.p_images);}(itemsByOrder[it.order_id]=itemsByOrder[it.order_id]||[]).push({product_id:it.product_id,product_name:it.product_name,quantity:it.quantity,price:it.unit_price,total_price:it.total_price,image:img});}}}catch(e){console.error('[dashboard items]',e.message);}
 res.json(limitDashboardForStaff(req.staffPerms,{store:full,stats:{totalOrders:to,totalRevenue:tr,avgOrderValue:kept?Math.round(tr/kept):0,totalProducts:tp,totalCustomers:tc,storeVisits:visits},statusCounts,trend,recentOrders:ro.map(o=>{let _c=full.config||{};if(typeof _c==='string'){try{_c=JSON.parse(_c);}catch{_c={};}}return{...o,order_number:formatOrderNumber(o.order_number,_c),items:itemsByOrder[o.id]||[],first_image:(itemsByOrder[o.id]||[]).find(i=>i.image)?.image||null};}),salesData:sd}));}catch(e){res.status(500).json({error:e.message});}});
 
 // ANALYTICS — everything the Analytics page charts, computed over ALL of the
@@ -607,8 +610,17 @@ router.get('/stores/:sid/analytics',authMiddleware(['store_owner']),async(req,re
   try{visitsRaw=(await pool.query('SELECT total_visits FROM stores WHERE id=$1',[sid])).rows[0]?.total_visits;}catch{}
   const RANGES={'7d':'7 days','30d':'30 days','3m':'3 months','6m':'6 months','1y':'1 year'};
   const range=(RANGES[req.query.range]||req.query.range==='all')?req.query.range:'30d';
-  let start;
-  if(range==='all'){
+  // A picked "from date A to date B" wins over the preset range. `to` is
+  // inclusive, so the window ends at the start of the following day.
+  const DAY=/^\d{4}-\d{2}-\d{2}$/;
+  const customFrom=DAY.test(String(req.query.from||''))?new Date(req.query.from+'T00:00:00'):null;
+  const customTo=DAY.test(String(req.query.to||''))?new Date(req.query.to+'T00:00:00'):null;
+  let start,end=null;
+  if(customFrom||customTo){
+    start=customFrom||new Date(Date.now()-29*864e5);
+    if(customTo){end=new Date(customTo.getTime()+864e5);}
+    if(customFrom&&customTo&&customFrom>customTo){start=customTo;end=new Date(customFrom.getTime()+864e5);}
+  }else if(range==='all'){
     const m=await pool.query("SELECT MIN(created_at) AS m FROM orders WHERE store_id=$1 AND is_deleted IS NOT TRUE",[sid]);
     start=m.rows[0].m||new Date(Date.now()-29*864e5);
   }else{
@@ -618,31 +630,34 @@ router.get('/stores/:sid/analytics',authMiddleware(['store_owner']),async(req,re
     else d.setFullYear(d.getFullYear()-1);
     start=d;
   }
-  const days=(Date.now()-new Date(start).getTime())/864e5;
+  // Open-ended windows run to "now"; $3 is always bound so every query below
+  // can use the same shape.
+  const endParam=end||new Date(Date.now()+864e5);
+  const days=((end?end.getTime():Date.now())-new Date(start).getTime())/864e5;
   const unit=days<=93?'day':days<=370?'week':'month'; // whitelisted, safe to inline
   // Revenue = orders that were not cancelled / refunded / returned.
   const LOST="('cancelled','canceled','refunded','returned','failed')";
-  const base="o.store_id=$1 AND o.is_deleted IS NOT TRUE AND o.created_at>=$2";
+  const base="o.store_id=$1 AND o.is_deleted IS NOT TRUE AND o.created_at>=$2 AND o.created_at<$3";
   const [series,totals,status,top,recent]=await Promise.all([
-    pool.query(`WITH b AS (SELECT generate_series(date_trunc('${unit}',$2::timestamptz),date_trunc('${unit}',NOW()),INTERVAL '1 ${unit}') AS d)
+    pool.query(`WITH b AS (SELECT generate_series(date_trunc('${unit}',$2::timestamptz),date_trunc('${unit}',LEAST(NOW(),$3::timestamptz - INTERVAL '1 second')),INTERVAL '1 ${unit}') AS d)
       SELECT to_char(b.d,'YYYY-MM-DD') AS date,COUNT(o.id)::int AS orders,
         COALESCE(SUM(o.total) FILTER (WHERE LOWER(COALESCE(o.status,'')) NOT IN ${LOST}),0)::float AS revenue
-      FROM b LEFT JOIN orders o ON o.store_id=$1 AND o.is_deleted IS NOT TRUE AND date_trunc('${unit}',o.created_at)=b.d
-      GROUP BY b.d ORDER BY b.d`,[sid,start]),
+      FROM b LEFT JOIN orders o ON o.store_id=$1 AND o.is_deleted IS NOT TRUE AND o.created_at>=$2 AND o.created_at<$3 AND date_trunc('${unit}',o.created_at)=b.d
+      GROUP BY b.d ORDER BY b.d`,[sid,start,endParam]),
     pool.query(`SELECT COUNT(*)::int AS orders,
         COALESCE(SUM(o.total) FILTER (WHERE LOWER(COALESCE(o.status,'')) NOT IN ${LOST}),0)::float AS revenue,
         COUNT(*) FILTER (WHERE LOWER(COALESCE(o.status,'')) NOT IN ${LOST})::int AS kept_orders,
         COUNT(DISTINCT NULLIF(o.customer_phone,''))::int AS customers
-      FROM orders o WHERE ${base}`,[sid,start]),
+      FROM orders o WHERE ${base}`,[sid,start,endParam]),
     pool.query(`SELECT LOWER(COALESCE(NULLIF(o.status,''),'pending')) AS name,COUNT(*)::int AS value
-      FROM orders o WHERE ${base} GROUP BY 1 ORDER BY 2 DESC`,[sid,start]),
+      FROM orders o WHERE ${base} GROUP BY 1 ORDER BY 2 DESC`,[sid,start,endParam]),
     pool.query(`SELECT MAX(oi.product_name) AS name,SUM(COALESCE(oi.quantity,1))::int AS qty,
         COALESCE(SUM(COALESCE(oi.total_price,oi.unit_price*COALESCE(oi.quantity,1))),0)::float AS revenue
       FROM order_items oi JOIN orders o ON o.id=oi.order_id
       WHERE ${base} AND LOWER(COALESCE(o.status,'')) NOT IN ${LOST}
-      GROUP BY COALESCE(oi.product_id::text,oi.product_name) ORDER BY qty DESC,revenue DESC LIMIT 6`,[sid,start]),
+      GROUP BY COALESCE(oi.product_id::text,oi.product_name) ORDER BY qty DESC,revenue DESC LIMIT 6`,[sid,start,endParam]),
     pool.query(`SELECT o.id,o.order_number,o.customer_name,o.total,o.status,o.created_at FROM orders o
-      WHERE ${base} ORDER BY o.created_at DESC LIMIT 10`,[sid,start]),
+      WHERE ${base} ORDER BY o.created_at DESC LIMIT 10`,[sid,start,endParam]),
   ]);
   const t=totals.rows[0]||{};
   let totalProducts=0,totalCustomers=0;
@@ -652,7 +667,7 @@ router.get('/stores/:sid/analytics',authMiddleware(['store_owner']),async(req,re
   const visits=parseInt(visitsRaw)||0;
   const cfg=own.rows[0].config;
   res.json({
-    range,unit,
+    range,unit,from:new Date(start).toISOString().slice(0,10),to:end?new Date(end.getTime()-864e5).toISOString().slice(0,10):null,
     totals:{
       revenue:t.revenue||0,orders:t.orders||0,
       avgOrder:t.kept_orders?Math.round((t.revenue||0)/t.kept_orders):0,
