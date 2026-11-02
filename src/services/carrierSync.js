@@ -168,22 +168,34 @@ async function autoDispatchOrder(storeId, orderId, dcId) {
       return { ok: true, tracking_number: null };
     }
 
+    await ensureDispatchCols();
     const items = (await pool.query('SELECT oi.*, (COALESCE(oi.is_fragile,FALSE) OR COALESCE(p.is_fragile,FALSE)) AS is_fragile FROM order_items oi LEFT JOIN products p ON p.id=oi.product_id WHERE oi.order_id=$1', [orderId])).rows;
     const result = await carrierCreateOrder(dc, order, items);
     if (result.ok) {
       const tn = result.tracking_number || '';
       await pool.query(
         `UPDATE orders SET tracking_number=COALESCE(NULLIF($1,''),tracking_number),delivery_company_id=$2,status='shipped',carrier_data=$3::jsonb,updated_at=NOW(),
-         external_id=COALESCE(external_id,$4) WHERE id=$5`,
+         dispatch_status='sent',dispatch_error=NULL,external_id=COALESCE(external_id,$4) WHERE id=$5`,
         [tn, dcId, JSON.stringify(result.carrier_response), tn || String(order.order_number || order.id), orderId]
       );
       console.log(`[AutoDispatch] Order ${orderId} → ${dc.name}` + (tn ? ` TN: ${tn}` : ' (tracking syncs automatically)'));
+    } else {
+      // Same record as a manual transfer, so the order keeps its Transfer button.
+      await pool.query("UPDATE orders SET dispatch_status='failed',dispatch_error=$1,updated_at=NOW() WHERE id=$2",
+        [String(result.err || 'Carrier rejected the order').slice(0, 2000), orderId]).catch(() => {});
     }
     return result;
   } catch (e) {
     console.error('[AutoDispatch]', e.message);
     return null;
   }
+}
+
+async function ensureDispatchCols() {
+  for (const sql of [
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS dispatch_status VARCHAR(20)",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS dispatch_error TEXT",
+  ]) { try { await pool.query(sql); } catch {} }
 }
 
 async function runFullSync() {

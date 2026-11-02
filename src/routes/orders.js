@@ -802,6 +802,11 @@ router.post('/stores/:sid/orders/:oid/dispatch',authMiddleware(['store_owner','s
     "ALTER TABLE delivery_companies ADD COLUMN IF NOT EXISTS api_create_method VARCHAR(10) DEFAULT 'POST'",
     "ALTER TABLE delivery_companies ADD COLUMN IF NOT EXISTS api_create_body_template TEXT",
     "ALTER TABLE delivery_companies ADD COLUMN IF NOT EXISTS api_create_tracking_path VARCHAR(255)",
+    // How the last transfer to the carrier went. Without this a rejected
+    // order still showed the carrier's name in the Transfer column, as if it
+    // had gone through, and lost its Transfer button.
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS dispatch_status VARCHAR(20)",
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS dispatch_error TEXT",
   ]) { try { await pool.query(sql); } catch {} }
 
   const order=(await pool.query('SELECT * FROM orders WHERE id=$1 AND store_id=$2',[req.params.oid,req.params.sid])).rows[0];
@@ -821,7 +826,7 @@ router.post('/stores/:sid/orders/:oid/dispatch',authMiddleware(['store_owner','s
 
   // Carriers without ANY API → manual mode.
   if(!dc.api_base_url){
-    try{await pool.query("UPDATE orders SET delivery_company_id=$1,status='shipped',shipped_at=NOW(),updated_at=NOW() WHERE id=$2",[wantedDcId,order.id]);}catch{}
+    try{await pool.query("UPDATE orders SET delivery_company_id=$1,status='shipped',shipped_at=NOW(),updated_at=NOW(),dispatch_status='manual',dispatch_error=NULL WHERE id=$2",[wantedDcId,order.id]);}catch{}
     return res.json({ok:true,manual:true,message:`${dc.name} is a manual carrier. Order saved — paste the tracking number once you create it on their platform.`});
   }
 
@@ -830,7 +835,9 @@ router.post('/stores/:sid/orders/:oid/dispatch',authMiddleware(['store_owner','s
     try{await pool.query('UPDATE orders SET shipping_city=$1 WHERE id=$2',[order.shipping_city,order.id]);}catch{}
   }
   if(!order.shipping_city){
-    return res.json({ok:false,error:`Commune is required by ${dc.name}. Please set the commune/city on this order before dispatching.`});
+    const msg=`Commune is required by ${dc.name}. Please set the commune/city on this order before dispatching.`;
+    try{await pool.query("UPDATE orders SET dispatch_status='failed',dispatch_error=$1,updated_at=NOW() WHERE id=$2",[msg,order.id]);}catch{}
+    return res.json({ok:false,error:msg});
   }
 
   // Pull is_fragile from the product too, so orders placed before the column
@@ -858,6 +865,9 @@ router.post('/stores/:sid/orders/:oid/dispatch',authMiddleware(['store_owner','s
       errMsg = `${carrierHost} returned 404 with empty message. This usually means: (1) your api_token or user_guid is wrong — re-copy them from your ${dc.name} dashboard, OR (2) the commune "${order.shipping_city}" is not recognized by ${dc.name} — check your account's enabled communes.`;
     }
     console.log(`[dispatch] FAILED: ${errMsg}`);
+    // The order keeps the chosen carrier (so a retry is one click) but is
+    // marked failed, so the Transfer column still offers Transfer.
+    try{await pool.query("UPDATE orders SET dispatch_status='failed',dispatch_error=$1,updated_at=NOW() WHERE id=$2",[String(errMsg).slice(0,2000),order.id]);}catch{}
     return res.json({ok:false,error:errMsg,carrier_response:trimResp(result.carrier_response),carrier_status:result.status,
       debug:{request_url:result.request_url,request_body:result.request_body,tried:result.tried}});
   }
@@ -869,6 +879,7 @@ router.post('/stores/:sid/orders/:oid/dispatch',authMiddleware(['store_owner','s
     ]) { try { await pool.query(sql); } catch {} }
     await pool.query(
       `UPDATE orders SET tracking_number=COALESCE(NULLIF($1,''),tracking_number),delivery_company_id=$2,status='shipped',shipped_at=NOW(),updated_at=NOW(),
+       dispatch_status='sent', dispatch_error=NULL,
        carrier_data=$3::jsonb, external_id=COALESCE(external_id,$4) WHERE id=$5`,
       [tn, wantedDcId, JSON.stringify(result.carrier_response||{}), tn||String(order.order_number||order.id), order.id]
     );
