@@ -115,8 +115,25 @@ router.delete('/stores/:sid/products/:pid',authMiddleware(['store_owner']),async
 }catch(e){res.status(500).json({error:e.message});}});
 
 // Categories
-router.get('/stores/:sid/categories',authMiddleware(['store_owner','store_staff']),async(req,res)=>{try{const r=await pool.query('SELECT c.*,(SELECT COUNT(*) FROM products WHERE category_id=c.id) as product_count FROM categories c WHERE c.store_id=$1 ORDER BY c.sort_order',[req.params.sid]);res.json(r.rows.map(c=>({...c,name_en:c.name,name_fr:c.name,name_ar:c.name,image:c.image_url})));}catch(e){res.json([]);}});
+router.get('/stores/:sid/categories',authMiddleware(['store_owner','store_staff']),async(req,res)=>{try{try{await pool.query('ALTER TABLE categories ADD COLUMN IF NOT EXISTS parent_id UUID');}catch(e){}const r=await pool.query('SELECT c.*,(SELECT COUNT(*) FROM products WHERE category_id=c.id) as product_count FROM categories c WHERE c.store_id=$1 ORDER BY c.sort_order',[req.params.sid]);res.json(r.rows.map(c=>({...c,name_en:c.name,name_fr:c.name,name_ar:c.name,image:c.image_url})));}catch(e){res.json([]);}});
 router.post('/stores/:sid/categories',authMiddleware(['store_owner']),async(req,res)=>{try{const{name_en,image,parent_id}=req.body;const name=name_en||'Category';const slug=slugify(name,{lower:true,strict:true})+'-'+Date.now().toString(36);const r=await pool.query('INSERT INTO categories(store_id,name,slug,image_url,parent_id) VALUES($1,$2,$3,$4,$5) RETURNING *',[req.params.sid,name,slug,image||null,nullIfEmpty(parent_id)]);res.status(201).json({...r.rows[0],name_en:r.rows[0].name});}catch(e){res.status(500).json({error:e.message});}});
+
+// Rename a category or move it under another one (or out to the top level).
+router.patch('/stores/:sid/categories/:cid',authMiddleware(['store_owner']),async(req,res)=>{try{
+  try{await pool.query('ALTER TABLE categories ADD COLUMN IF NOT EXISTS parent_id UUID');}catch(e){}
+  const{name_en,image,parent_id}=req.body||{};
+  // A category cannot be its own parent, nor sit inside its own descendant.
+  if(parent_id){
+    if(String(parent_id)===String(req.params.cid))return res.status(400).json({error:'A category cannot be inside itself'});
+    const all=(await pool.query('SELECT id,parent_id FROM categories WHERE store_id=$1',[req.params.sid])).rows;
+    let cur=all.find(c=>String(c.id)===String(parent_id)),seen=new Set();
+    while(cur&&cur.parent_id&&!seen.has(String(cur.id))){seen.add(String(cur.id));if(String(cur.parent_id)===String(req.params.cid))return res.status(400).json({error:'That would put the category inside one of its own subcategories'});cur=all.find(c=>String(c.id)===String(cur.parent_id));}
+  }
+  const r=await pool.query('UPDATE categories SET name=COALESCE($1,name),image_url=COALESCE($2,image_url),parent_id=$3 WHERE id=$4 AND store_id=$5 RETURNING *',
+    [nullIfEmpty(name_en),nullIfEmpty(image),nullIfEmpty(parent_id),req.params.cid,req.params.sid]);
+  if(!r.rows.length)return res.status(404).json({error:'Category not found'});
+  res.json({...r.rows[0],name_en:r.rows[0].name});
+}catch(e){res.status(500).json({error:e.message});}});
 
 // Apps
 router.get('/stores/:sid/apps',authMiddleware(['store_owner']),async(req,res)=>{try{res.json((await pool.query('SELECT * FROM store_apps WHERE store_id=$1',[req.params.sid])).rows);}catch(e){res.json([]);}});
