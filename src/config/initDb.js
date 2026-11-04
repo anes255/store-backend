@@ -130,6 +130,7 @@ const initDb=async()=>{
       admin_phone VARCHAR(50), admin_password_hash TEXT, admin_name VARCHAR(100),
       google_client_id VARCHAR(500),
       landing_blocks TEXT DEFAULT '[]',
+      howto_blocks TEXT DEFAULT '[]',
       created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW()
     )`);
       await pool.query("INSERT INTO platform_settings(site_name) SELECT 'MakretDZ' WHERE NOT EXISTS(SELECT 1 FROM platform_settings)");
@@ -418,6 +419,7 @@ const initDb=async()=>{
     try{await pool.query("ALTER TABLE platform_settings ALTER COLUMN logo_url TYPE TEXT");}catch(e){}
     try{await pool.query("ALTER TABLE platform_settings ALTER COLUMN favicon_url TYPE TEXT");}catch(e){}
     try{await pool.query("ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS landing_blocks TEXT DEFAULT '[]'");}catch(e){}
+    try{await pool.query("ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS howto_blocks TEXT DEFAULT '[]'");}catch(e){}
     try{await pool.query("ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS google_client_id VARCHAR(500)");}catch(e){}
 
     // ═══ NEW: Order tracking columns ═══

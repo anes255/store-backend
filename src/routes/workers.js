@@ -112,7 +112,7 @@ async function computeEarnings(sid, year, month, staffIds = null) {
     staffIds ? [sid, staffIds] : [sid]
   )).rows;
   const counts = (await pool.query(
-    `SELECT staff_id, action, COUNT(*)::int AS n FROM worker_order_actions
+    `SELECT staff_id, action, COUNT(DISTINCT order_id)::int AS n FROM worker_order_actions
      WHERE store_id=$1 AND staff_id IS NOT NULL AND action = ANY($4::text[])
        AND created_at >= make_timestamptz($2,$3,1,0,0,0,'Africa/Algiers')
        AND created_at <  make_timestamptz($2,$3,1,0,0,0,'Africa/Algiers') + INTERVAL '1 month'
@@ -869,6 +869,14 @@ router.post('/stores/:sid/orders/auto-assign', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// How many unassigned new orders are waiting right now.
+router.get('/stores/:sid/orders/auto-assign/available', auth, async (req, res) => {
+  try {
+    const { waitingCount } = require('../services/orderDistribution');
+    res.json({ available: await waitingCount(req.params.sid, req.query.include_call_failed === '1' || req.query.include_call_failed === 'true') });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // Automatic assignment of every new order (store setting).
 router.get('/stores/:sid/orders/auto-assign/settings', auth, async (req, res) => {
   try { res.json(await require('../services/orderDistribution').readSettings(req.params.sid)); } catch (e) { res.status(500).json({ error: e.message }); }
@@ -1086,8 +1094,8 @@ router.get('/stores/:sid/payroll/items/:iid/orders', auth, async (req, res) => {
         AND ($6::timestamptz IS NULL OR a.created_at <= $6::timestamptz)`;
     // a locked line lists exactly the orders it was calculated from
     const args = [req.params.sid, item.staff_id, action, period.year, period.month, item.locked ? (item.calculated_at || item.approved_at) : null];
-    const total = (await pool.query(`SELECT COUNT(*)::int AS n ${base}`, args)).rows[0].n;
-    const rows = (await pool.query(`SELECT a.order_id, a.order_number, a.created_at, o.customer_name, o.total, o.status ${base} ORDER BY a.created_at LIMIT ${limit} OFFSET ${offset}`, args)).rows;
+    const total = (await pool.query(`SELECT COUNT(DISTINCT a.order_id)::int AS n ${base}`, args)).rows[0].n;
+    const rows = (await pool.query(`SELECT DISTINCT ON (a.order_id) a.order_id, a.order_number, a.created_at, o.customer_name, o.total, o.status ${base} ORDER BY a.order_id, a.created_at LIMIT ${limit} OFFSET ${offset}`, args)).rows;
     res.json({ action, total, orders: rows });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });

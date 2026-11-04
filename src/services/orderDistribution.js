@@ -37,7 +37,7 @@ async function distribute(storeId, { workerIds, perWorker, total, includeCallFai
   if (!limit) return { error: 'Give the number of orders to distribute.' };
   const statuses = includeCallFailed ? [...NEW_STATUSES, ...CALL_FAILED] : NEW_STATUSES;
   const orders = (await pool.query(
-    `SELECT id, order_number, status FROM orders WHERE store_id=$1 AND assigned_staff_id IS NULL AND status = ANY($2::text[]) AND (is_deleted IS NOT TRUE) ORDER BY created_at ASC LIMIT $3`,
+    `SELECT id, order_number, status FROM orders WHERE store_id=$1 AND assigned_staff_id IS NULL AND status = ANY($2::text[]) AND (is_deleted IS NOT TRUE) AND (is_archived IS NOT TRUE) ORDER BY created_at ASC LIMIT $3`,
     [storeId, statuses, limit])).rows;
   const open = await openCounts(storeId, workers.map((w) => w.id));
   const queue = [...workers].sort((a, b) => (open[a.id] || 0) - (open[b.id] || 0));
@@ -55,6 +55,16 @@ async function distribute(storeId, { workerIds, perWorker, total, includeCallFai
   }
   const assigned = Object.values(perCount).reduce((a, b) => a + b, 0);
   return { assigned, available: orders.length, workers: workers.map((w) => ({ id: w.id, name: [w.first_name, w.last_name].filter(Boolean).join(' ') || w.name, count: perCount[w.id] })) };
+}
+
+// Orders waiting to be handed out. The dialog shows this so "5 and 5" or
+// "2 each" can be chosen against a real number.
+async function waitingCount(storeId, includeCallFailed = false) {
+  const statuses = includeCallFailed ? [...NEW_STATUSES, ...CALL_FAILED] : NEW_STATUSES;
+  const r = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM orders WHERE store_id=$1 AND assigned_staff_id IS NULL AND status = ANY($2::text[]) AND (is_deleted IS NOT TRUE) AND (is_archived IS NOT TRUE)`,
+    [storeId, statuses]);
+  return r.rows[0]?.n || 0;
 }
 
 async function readSettings(storeId) {
@@ -82,4 +92,4 @@ async function autoAssignNew(storeId, orderId) {
   } catch (e) { console.log('[auto-assign]', e.message); return null; }
 }
 
-module.exports = { distribute, autoAssignNew, readSettings, isUuid };
+module.exports = { distribute, autoAssignNew, readSettings, waitingCount, isUuid };

@@ -921,4 +921,4 @@ async function carrierDeleteOrder(rawCfg, trackingNumber) {
   }
 }
 
-module.exports = { carrierRequest, carrierCreateOrder, carrierDeleteOrder, detectCarrier, normalizeConfig, extractStatus, wilayaToCode };
+module.exports = { carrierRequest, carrierCreateOrder, carrierDeleteOrder, detectCarrier, normalizeConfig, extractStatus, wilayaToCode, NOEST_STATIONS };

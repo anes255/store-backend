@@ -19,6 +19,7 @@ function ensurePlatformSchema(){
       "ALTER TABLE stores ADD COLUMN IF NOT EXISTS is_published BOOLEAN DEFAULT true",
       "ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS subscription_trial_enabled BOOLEAN DEFAULT TRUE",
       "ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS subscription_trial_plan VARCHAR(50) DEFAULT 'basic'",
+      "ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS howto_blocks TEXT DEFAULT '[]'",
     ];
     for(const s of alters){try{await pool.query(s);}catch(e){/* non-fatal */}}
     // Indexes only speed things up — build them in the BACKGROUND so the first
@@ -177,11 +178,14 @@ router.put('/store-owners/:id/password', authMiddleware(['platform_admin']), asy
 router.get('/settings',authMiddleware(['platform_admin']),async(req,res)=>{try{
   await ensurePlatformSchema();
   const r=await pool.query('SELECT * FROM platform_settings LIMIT 1');const s=r.rows[0]||{};res.json({...s,site_logo:s.logo_url,favicon:s.favicon_url,trial_days:s.subscription_trial_days,trial_enabled:s.subscription_trial_enabled!==false,trial_plan:s.subscription_trial_plan||'basic'});}catch(e){res.json({site_name:'MakretDZ'});}});
-router.put('/settings',authMiddleware(['platform_admin']),async(req,res)=>{try{const f=req.body;const map={site_name:'site_name',primary_color:'primary_color',secondary_color:'secondary_color',accent_color:'accent_color',subscription_monthly_price:'subscription_monthly_price',subscription_yearly_price:'subscription_yearly_price',trial_days:'subscription_trial_days',trial_enabled:'subscription_trial_enabled',trial_plan:'subscription_trial_plan',site_logo:'logo_url',favicon:'favicon_url',meta_description:'meta_description',maintenance_mode:'maintenance_mode',currency:'currency',landing_blocks:'landing_blocks',google_client_id:'google_client_id'};
+router.put('/settings',authMiddleware(['platform_admin']),async(req,res)=>{try{const f=req.body;const map={site_name:'site_name',primary_color:'primary_color',secondary_color:'secondary_color',accent_color:'accent_color',subscription_monthly_price:'subscription_monthly_price',subscription_yearly_price:'subscription_yearly_price',trial_days:'subscription_trial_days',trial_enabled:'subscription_trial_enabled',trial_plan:'subscription_trial_plan',site_logo:'logo_url',favicon:'favicon_url',meta_description:'meta_description',maintenance_mode:'maintenance_mode',currency:'currency',landing_blocks:'landing_blocks',howto_blocks:'howto_blocks',google_client_id:'google_client_id'};
   try{await pool.query("ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS subscription_trial_enabled BOOLEAN DEFAULT TRUE");}catch{}
   try{await pool.query("ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS subscription_trial_plan VARCHAR(50) DEFAULT 'basic'");}catch{}
   // Auto-add landing_blocks column if missing
   try{await pool.query("ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS landing_blocks TEXT DEFAULT '[]'");}catch(e){}
+  // The "How to use" page store owners read in their settings, built with the
+  // same blocks as the landing page.
+  try{await pool.query("ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS howto_blocks TEXT DEFAULT '[]'");}catch(e){}
   // Base64 image uploads (logo + favicon) easily exceed VARCHAR limits — force TEXT
   try{await pool.query("ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS favicon_url TEXT");}catch(e){}
   try{await pool.query("ALTER TABLE platform_settings ADD COLUMN IF NOT EXISTS logo_url TEXT");}catch(e){}

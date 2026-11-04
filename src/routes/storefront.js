@@ -1,5 +1,6 @@
 const express=require('express'),router=express.Router(),bcrypt=require('bcryptjs'),pool=require('../config/db'),{authMiddleware,generateToken}=require('../middleware/auth');
 const {imgUrl,imgList,firstImg}=require('../utils/images');
+const {variantLabel:readVariant}=require('../utils/variantLabel');
 const messaging=require('../services/messaging');
 
 // Format an order number using the store's custom prefix/suffix/start.
@@ -247,14 +248,7 @@ router.get('/:slug/customers/profile',authMiddleware([]),async(req,res)=>{try{aw
       for(const it of itemsRes.rows){
         const key=it.order_id;
         if(!itemsByOrder[key])itemsByOrder[key]=[];
-        let variantLabel=null;
-        if(it.variant_info){
-          try{
-            const v=typeof it.variant_info==='string'?JSON.parse(it.variant_info):it.variant_info;
-            if(v&&typeof v==='object'){variantLabel=Object.entries(v).map(([k,val])=>`${k}: ${val}`).join(' · ');}
-            else if(v)variantLabel=String(v);
-          }catch(e){variantLabel=String(it.variant_info);}
-        }
+        const variantLabel=readVariant(it.variant_info);
         // Resolve image: saved snapshot first, else look up the current product's first image
         let img=imgUrl(it.product_image);
         if(!img&&it.product_images_current){
@@ -685,8 +679,7 @@ router.get('/:slug/track',async(req,res)=>{try{
       const itemsRes=await pool.query('SELECT * FROM order_items WHERE order_id = ANY($1::uuid[])',[orderIds]);
       for(const it of itemsRes.rows){
         if(!itemsByOrder[it.order_id])itemsByOrder[it.order_id]=[];
-        let variantLabel=null;
-        if(it.variant_info){try{const v=typeof it.variant_info==='string'?JSON.parse(it.variant_info):it.variant_info;if(v&&typeof v==='object')variantLabel=Object.entries(v).map(([k,val])=>`${k}: ${val}`).join(' · ');else if(v)variantLabel=String(v);}catch(e){variantLabel=String(it.variant_info);}}
+        const variantLabel=readVariant(it.variant_info);
         itemsByOrder[it.order_id].push({...it,name:it.product_name,price:it.unit_price,variant_label:variantLabel});
       }
     }catch(e){}

@@ -50,7 +50,7 @@ app.get('/favicon.ico',(req,res)=>res.status(204).end());
 app.get('/api/health',(req,res)=>res.json({status:'ok'}));
 
 // Platform info
-app.get('/api/platform-info',async(req,res)=>{try{const r=await pool.query('SELECT * FROM platform_settings LIMIT 1');const s=r.rows[0]||{};res.json({site_name:s.site_name||'MakretDZ',site_logo:s.logo_url,primary_color:s.primary_color||'#C5A55A',secondary_color:s.secondary_color||'#06B6D4',accent_color:s.accent_color||'#F59E0B',meta_description:s.meta_description,favicon:s.favicon_url,maintenance_mode:s.maintenance_mode,currency:s.currency||'DZD',landing_blocks:s.landing_blocks||'[]',google_client_id:s.google_client_id||'',trial_days:parseInt(s.subscription_trial_days||0,10)||14,trial_enabled:s.subscription_trial_enabled!==false});}catch(e){res.json({site_name:'MakretDZ',landing_blocks:'[]',trial_days:14,trial_enabled:true});}});
+app.get('/api/platform-info',async(req,res)=>{try{const r=await pool.query('SELECT * FROM platform_settings LIMIT 1');const s=r.rows[0]||{};res.json({site_name:s.site_name||'MakretDZ',site_logo:s.logo_url,primary_color:s.primary_color||'#C5A55A',secondary_color:s.secondary_color||'#06B6D4',accent_color:s.accent_color||'#F59E0B',meta_description:s.meta_description,favicon:s.favicon_url,maintenance_mode:s.maintenance_mode,currency:s.currency||'DZD',landing_blocks:s.landing_blocks||'[]',howto_blocks:s.howto_blocks||'[]',google_client_id:s.google_client_id||'',trial_days:parseInt(s.subscription_trial_days||0,10)||14,trial_enabled:s.subscription_trial_enabled!==false});}catch(e){res.json({site_name:'MakretDZ',landing_blocks:'[]',trial_days:14,trial_enabled:true});}});
 
 // Load routes
 const routes=[

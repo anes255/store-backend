@@ -59,7 +59,7 @@ router.get('/stores/:sid/orders',authMiddleware(['store_owner','store_staff']),a
   // archived: 'only' = archived only, 'all' = active+archived (no deleted), 'vault' = EVERYTHING incl deleted, 'deleted' = only deleted, default = non-archived non-deleted
   if(archived==='vault'){/* no extra filter — all-time archive incl deleted */}
   else if(archived==='deleted')q+=' AND is_deleted=TRUE';
-  else if(archived==='only')q+=' AND is_archived=TRUE';
+  else if(archived==='only')q+=' AND is_archived=TRUE AND (is_deleted IS NULL OR is_deleted=FALSE)';
   else if(archived==='all')q+=' AND (is_deleted IS NULL OR is_deleted=FALSE)';
   else q+=' AND (is_archived IS NULL OR is_archived=FALSE) AND (is_deleted IS NULL OR is_deleted=FALSE)';
   // Hide pending-payment orders (CCP/BaridiMob without receipt yet) — they
@@ -187,8 +187,9 @@ router.post('/stores/:sid/orders/bulk-delete',authMiddleware(['store_owner','sto
   await ensureArchiveCol();
   const{ids}=req.body||{};
   if(!Array.isArray(ids)||!ids.length)return res.status(400).json({error:'ids required'});
-  await pool.query('UPDATE orders SET is_deleted=TRUE,deleted_at=NOW(),deleted_by=$1,updated_at=NOW() WHERE id=ANY($2::uuid[]) AND store_id=$3',[req.user?.id||null,ids,req.params.sid]);
-  res.json({ok:true,count:ids.length});
+  const r=await pool.query('UPDATE orders SET is_deleted=TRUE,deleted_at=NOW(),deleted_by=$1,updated_at=NOW() WHERE id=ANY($2::uuid[]) AND store_id=$3 AND (is_deleted IS NULL OR is_deleted=FALSE)',[req.user?.id||null,ids,req.params.sid]);
+  if(!r.rowCount)return res.status(404).json({error:'None of those orders could be deleted'});
+  res.json({ok:true,count:r.rowCount,requested:ids.length});
 }catch(e){res.status(500).json({error:e.message});}});
 
 // Restore soft-deleted order from vault
