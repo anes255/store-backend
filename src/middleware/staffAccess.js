@@ -53,9 +53,20 @@ const ownsStore = (ownerId, sid) => cached(`own:${ownerId}:${sid}`, async () => 
 // The staff member's own row (by staff_id) — used to know who they are.
 const staffRow = (staffId) => cached(`staff:${staffId}`, async () => {
   let r;
-  try { r = await pool.query('SELECT id,store_id,email,phone,username,is_active,permissions,status,session_version FROM store_staff WHERE id=$1', [staffId]); }
+  try { r = await pool.query('SELECT id,store_id,email,phone,username,is_active,permissions,role_template_id,status,session_version FROM store_staff WHERE id=$1', [staffId]); }
   catch { r = await pool.query('SELECT id,store_id,email,phone,is_active,permissions FROM store_staff WHERE id=$1', [staffId]); }
   return r.rows[0] || null;
+});
+
+// The permissions carried by a role, read from the store's own templates.
+const roleTemplatePerms = (sid, roleId) => cached(`roleperms:${sid}:${roleId}`, async () => {
+  try {
+    let cfg = (await pool.query('SELECT config FROM stores WHERE id=$1', [sid])).rows[0]?.config || {};
+    if (typeof cfg === 'string') { try { cfg = JSON.parse(cfg); } catch { cfg = {}; } }
+    const list = Array.isArray(cfg.role_templates) ? cfg.role_templates : [];
+    const role = list.find((r) => String(r.id) === String(roleId));
+    return Array.isArray(role?.permissions) ? role.permissions : [];
+  } catch { return []; }
 });
 
 // "Last seen" for the Workers page (written at most once a minute per worker).
@@ -74,9 +85,9 @@ const staffRowForStore = (staffId, sid) => cached(`staff:${staffId}:${sid}`, asy
   if (!me) return null;
   if (String(me.store_id) === String(sid)) return me;
   let r = { rows: [] };
-  if (me.email) r = await pool.query('SELECT id,store_id,is_active,permissions FROM store_staff WHERE store_id=$1 AND LOWER(email)=LOWER($2) LIMIT 1', [sid, me.email]);
-  if (!r.rows.length && me.username) r = await pool.query('SELECT id,store_id,is_active,permissions FROM store_staff WHERE store_id=$1 AND LOWER(username)=LOWER($2) LIMIT 1', [sid, me.username]).catch(() => ({ rows: [] }));
-  if (!r.rows.length && me.phone) r = await pool.query('SELECT id,store_id,is_active,permissions FROM store_staff WHERE store_id=$1 AND phone=$2 LIMIT 1', [sid, me.phone]);
+  if (me.email) r = await pool.query('SELECT id,store_id,is_active,permissions,role_template_id FROM store_staff WHERE store_id=$1 AND LOWER(email)=LOWER($2) LIMIT 1', [sid, me.email]);
+  if (!r.rows.length && me.username) r = await pool.query('SELECT id,store_id,is_active,permissions,role_template_id FROM store_staff WHERE store_id=$1 AND LOWER(username)=LOWER($2) LIMIT 1', [sid, me.username]).catch(() => ({ rows: [] }));
+  if (!r.rows.length && me.phone) r = await pool.query('SELECT id,store_id,is_active,permissions,role_template_id FROM store_staff WHERE store_id=$1 AND phone=$2 LIMIT 1', [sid, me.phone]);
   return r.rows[0] || null;
 });
 
@@ -226,7 +237,8 @@ async function checkAccess(req, opts = {}) {
   }
   const row = await staffRowForStore(staffId, sid);
   if (!row || row.is_active === false) return { status: 403, error: 'You are not a member of this store.' };
-  const perms = normalizePerms(row.permissions);
+  let perms = normalizePerms(row.permissions);
+  if (!perms.size && row.role_template_id) perms = normalizePerms(await roleTemplatePerms(sid, row.role_template_id));
   req.staffPerms = perms;
   req.staffRowId = row.id;
   const rule = ruleFor(method, path);
