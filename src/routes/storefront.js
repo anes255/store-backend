@@ -1,6 +1,8 @@
 const express=require('express'),router=express.Router(),bcrypt=require('bcryptjs'),pool=require('../config/db'),{authMiddleware,generateToken}=require('../middleware/auth');
 const {imgUrl,imgList,firstImg}=require('../utils/images');
 const {variantLabel:readVariant}=require('../utils/variantLabel');
+const pricing=require('../services/pricing');
+const {ensurePromotionsSchema}=require('../config/promotionsSchema');
 const messaging=require('../services/messaging');
 
 // Format an order number using the store's custom prefix/suffix/start.
@@ -319,72 +321,77 @@ router.put('/:slug/customers/profile',authMiddleware([]),async(req,res)=>{try{co
   const c=(await pool.query('SELECT * FROM customers WHERE id=$1',[req.user.id])).rows[0];res.json({...c,password_hash:undefined,name:c.full_name});}catch(e){res.status(500).json({error:e.message});}});
 
 // Checkout
-// Store-wide coupons (Offers → Coupons): each is a percentage OR a fixed
-// amount. Fixed-amount coupons were always treated as a percentage, so a
-// "500 DZD off" code took 500% / some other amount off.
-function storeCouponDiscount(cfg,upperCode,subtotal){
-  cfg=cfg||{};
-  const all=[{active:cfg.store_coupon_active,code:cfg.store_coupon_code,value:parseFloat(cfg.store_coupon_discount_percent)||0,type:cfg.store_coupon_discount_type}];
-  if(Array.isArray(cfg.extra_coupons))cfg.extra_coupons.forEach(c=>all.push({active:c.active,code:c.code,value:parseFloat(c.discount)||0,type:c.discount_type}));
-  const sc=all.find(c=>c.active&&String(c.code||'').trim().toUpperCase()===upperCode&&c.value>0);
-  if(!sc)return null;
-  const sub=Math.max(0,parseFloat(subtotal)||0);
-  const discount=sc.type==='fixed'?Math.min(sub,Math.round(sc.value)):Math.round(sub*(sc.value/100));
-  return{discount,type:sc.type==='fixed'?'fixed':'percent',value:sc.value};
-}
-router.post('/:slug/orders',async(req,res)=>{try{let offerFreeShip=false;const store=(await pool.query('SELECT * FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.status(404).json({error:'Not found'});const sid=store.id;const{items,customer_name,customer_phone,customer_email,shipping_address,shipping_city,shipping_wilaya,shipping_zip,shipping_type,payment_method,notes,customer_id,notification_preference,delivery_company_id}=req.body;if(!items||!items.length)return res.status(400).json({error:'Cart empty'});if(!customer_name||!customer_phone||!shipping_address)return res.status(400).json({error:'Info required'});let subtotal=0;const oi=[];let storeCfg=store.config||{};if(typeof storeCfg==='string'){try{storeCfg=JSON.parse(storeCfg);}catch{storeCfg={};}}const allowStoreOversell=storeCfg.allow_oversell===true;for(const it of items){const p=(await pool.query('SELECT * FROM products WHERE id=$1 AND store_id=$2',[it.product_id,sid])).rows[0];if(!p)return res.status(400).json({error:`Product not found: ${it.product_id}`});
-  // Check stock — block the whole order if any item is out of stock and oversell is disabled
-  if(p.stock_quantity!==null&&p.stock_quantity<(it.quantity||1)&&!p.allow_oversell&&!allowStoreOversell&&p.track_inventory!==false){
-    return res.status(400).json({error:`Out of stock: ${p.name}`,product_id:p.id,out_of_stock:true});
-  }
-  let unitPrice=parseFloat(p.price)||0;
-  // Apply active offer discount (e.g. "40% OFF") before variant adjustments
-  if(p.is_on_sale&&p.offer_discount){const _opct=parseFloat(String(p.offer_discount).replace(/[^0-9.]/g,''))||0;if(_opct>0)unitPrice=Math.round(unitPrice*(1-_opct/100));}
-  if(it.variant){let vd=it.variant;if(typeof vd==='string'){try{vd=JSON.parse(vd);}catch{vd={};}}if(vd.price!=null&&parseFloat(vd.price)>0)unitPrice=parseFloat(vd.price);else if(vd.price_diff!=null)unitPrice+=parseFloat(vd.price_diff);else if(vd.additional_price!=null)unitPrice+=parseFloat(vd.additional_price);if(Array.isArray(vd.selections)){for(const sel of vd.selections){if(sel.price_diff!=null)unitPrice+=parseFloat(sel.price_diff);}}}
-  // Apply quantity offer discount (e.g. "Buy 3 get 20% OFF")
-  {let qOffers=p.quantity_offers;if(typeof qOffers==='string'){try{qOffers=JSON.parse(qOffers);}catch{qOffers=[];}}if(Array.isArray(qOffers)){const qMatch=qOffers.filter(qo=>parseInt(qo.quantity)>0&&it.quantity>=parseInt(qo.quantity)).sort((a,b)=>parseInt(b.quantity)-parseInt(a.quantity))[0];if(qMatch){if(qMatch.free_shipping)offerFreeShip=true;const _dv=parseFloat(qMatch.discount_value)||0;if(_dv>0){if(qMatch.discount_type==='fixed')unitPrice=Math.max(0,unitPrice-_dv);else unitPrice=Math.round(unitPrice*(1-_dv/100));}else if(qMatch.label){const _qm=String(qMatch.label).match(/(\d+(?:\.\d+)?)\s*%/);if(_qm){const _qpct=parseFloat(_qm[1]);if(_qpct>0)unitPrice=Math.round(unitPrice*(1-_qpct/100));}}}}}
-  const t=unitPrice*it.quantity;subtotal+=t;let imgs=p.images;if(typeof imgs==='string')try{imgs=JSON.parse(imgs);}catch(e){imgs=[];}if(!Array.isArray(imgs))imgs=[];oi.push({product_id:p.id,product_name:p.name,product_image:firstImg(p.images),variant_info:it.variant||null,quantity:it.quantity,unit_price:unitPrice,total_price:t,weight:(parseFloat(p.weight)||0)*(it.quantity||1)});}
-  // Determine shipping cost from wilaya rates (desk vs home delivery).
-  // If a delivery company is selected and that wilaya has a per-company price,
-  // use that price instead of the default desk/home rate.
-  let ship=400; // default fallback
+// Checkout pricing now lives in services/pricing.js, which also still
+// honours the old store-wide and per-product codes.
+router.post('/:slug/orders',async(req,res)=>{try{
+  await ensurePromotionsSchema();
+  const store=(await pool.query('SELECT * FROM stores WHERE slug=$1',[req.params.slug])).rows[0];
+  if(!store)return res.status(404).json({error:'Not found'});
+  const sid=store.id;
+  const{items,customer_name,customer_phone,customer_email,shipping_address,shipping_city,shipping_wilaya,shipping_zip,shipping_type,payment_method,notes,customer_id,notification_preference,delivery_company_id}=req.body;
+  if(!items||!items.length)return res.status(400).json({error:'Cart empty'});
+  if(!customer_name||!customer_phone||!shipping_address)return res.status(400).json({error:'Info required'});
   const sType=(shipping_type||'desk').toLowerCase();
-  const dcChosen=req.body?.delivery_company_id||null;
-  if(shipping_wilaya){try{
-    let wRow;
-    try{wRow=(await pool.query('SELECT desk_delivery_price,home_delivery_price,company_prices FROM shipping_wilayas WHERE store_id=$1 AND wilaya_name=$2',[sid,shipping_wilaya])).rows[0];}
-    catch{wRow=(await pool.query('SELECT desk_delivery_price,home_delivery_price FROM shipping_wilayas WHERE store_id=$1 AND wilaya_name=$2',[sid,shipping_wilaya])).rows[0];}
-    if(wRow){
-      let cp=wRow.company_prices;if(typeof cp==='string'){try{cp=JSON.parse(cp);}catch{cp={};}}
-      const perCompany=cp&&delivery_company_id?cp[delivery_company_id]:null;
-      if(perCompany){ship=sType==='home'?parseFloat(perCompany.home||perCompany.home_price||wRow.home_delivery_price||400):parseFloat(perCompany.desk||perCompany.desk_price||wRow.desk_delivery_price||400);}
-      else{ship=sType==='home'?parseFloat(wRow.home_delivery_price||400):parseFloat(wRow.desk_delivery_price||400);}
+
+  // Everything about money is worked out here, from the store's own rows --
+  // the same call the cart and the checkout used to show their figures.
+  const shipBase=await shippingCostFor(store,req.body);
+  const quote=await pricing.quoteCart(store,{
+    items,
+    couponCodes:couponCodesFrom(req.body),
+    shippingUnits:pricing.toUnits(shipBase),
+    customerId:customer_id||null,
+    customerPhone:customer_phone||null,
+    checkStock:true,
+  });
+  const stockProblem=(quote.errors||[]).find(e=>e.code==='out_of_stock');
+  if(stockProblem)return res.status(400).json({error:`Out of stock: ${stockProblem.name}`,product_id:stockProblem.product_id,out_of_stock:true});
+  const missing=(quote.errors||[]).find(e=>e.code==='product_missing');
+  if(missing)return res.status(400).json({error:`Product not found: ${missing.product_id}`});
+  if(!quote.items.length)return res.status(400).json({error:'Cart empty'});
+
+  // A coupon the buyer typed that cannot be used must not go through quietly
+  // at full price: say which one, and why.
+  const couponProblem=(quote.coupon_errors||[])[0];
+  if(couponProblem&&!quote.coupons.length){
+    return res.status(400).json({error:COUPON_MESSAGES[couponProblem.error]||'This coupon cannot be used',coupon_error:couponProblem.error,code:couponProblem.code});
+  }
+
+  // Claim each coupon's use before writing the order. The counter is raised
+  // with the limit in the WHERE clause, so two buyers racing for the last
+  // use cannot both win; whoever loses is told it ran out and is charged
+  // nothing. Claims are handed back if the order itself then fails.
+  const claimed=[];
+  for(const c of quote.coupons){
+    if(!c.id)continue;
+    const got=await pricing.claimCoupon(c.id);
+    if(!got){
+      for(const id of claimed)await pricing.releaseCoupon(id);
+      return res.status(409).json({error:COUPON_MESSAGES.race_lost,coupon_error:'usage_limit',code:c.code});
     }
-  }catch(e){}}
+    claimed.push(c.id);
+  }
+
+  const subtotal=quote.subtotal;
+  const ship=quote.shipping_cost;
+  const discount=pricing.fromUnits(pricing.toUnits(quote.offer_discount)+pricing.toUnits(quote.coupon_discount));
+  const oi=quote.items;
   const pm=(payment_method||'cod').toLowerCase();
   const isNonCod=['ccp','baridimob','bank_transfer'].includes(pm);
-  // Coupon deduction — validate server-side
-  let discount=0;
-  const couponCode=(req.body.coupon_code||'').trim().toUpperCase();
-  if(couponCode){
-    const cfg=storeCfg;
-    const matchedSC=storeCouponDiscount(cfg,couponCode,subtotal);
-    if(matchedSC){
-      discount=matchedSC.discount;
-    }else{
-      const cpProducts=await pool.query('SELECT id,price,coupon_code,coupon_discount_percent,coupon_active FROM products WHERE store_id=$1 AND coupon_active=TRUE AND coupon_code IS NOT NULL',[sid]);
-      const cpMatching=cpProducts.rows.filter(p=>String(p.coupon_code||'').trim().toUpperCase()===couponCode);
-      discount=cpMatching.reduce((s,p)=>{const pct=parseFloat(p.coupon_discount_percent)||0;return s+Math.round((parseFloat(p.price)||0)*(pct/100));},0);
-    }
-  }
-  // Free shipping: the store-wide "free above X" setting (measured on the
-  // products total, after offers) or a quantity offer that includes it.
-  // Neither was applied before, so buyers were still charged shipping.
-  const freeAbove=Number(store.free_shipping_threshold||0);
-  if(offerFreeShip||(store.free_shipping_enabled&&freeAbove>0&&subtotal>=freeAbove))ship=0;
   const total=subtotal+ship-discount;const num=parseInt((await pool.query('SELECT COALESCE(MAX(order_number),0)+1 as n FROM orders WHERE store_id=$1',[sid])).rows[0].n);const prefDcId=delivery_company_id||null;
   const initialStatus=(pm==='ccp'||pm==='baridimob')?'pending_payment':'new_order';
-  const o=await pool.query('INSERT INTO orders(store_id,customer_id,order_number,customer_name,customer_phone,customer_email,shipping_address,shipping_city,shipping_wilaya,shipping_zip,subtotal,shipping_cost,discount,total,payment_method,notes,notification_preference,shipping_type,preferred_delivery_company_id,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) RETURNING *',[sid,customer_id||null,num,customer_name,customer_phone,customer_email||null,shipping_address,shipping_city||null,shipping_wilaya||null,shipping_zip||null,subtotal,ship,discount,total,payment_method||'cod',notes||null,notification_preference||'whatsapp',sType,prefDcId,initialStatus]);try{await pool.query("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS weight NUMERIC DEFAULT 0");}catch(e){}for(const it of oi){await pool.query('INSERT INTO order_items(order_id,product_id,product_name,product_image,variant_info,quantity,unit_price,total_price,weight) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)',[o.rows[0].id,it.product_id,it.product_name,it.product_image,it.variant_info,it.quantity,it.unit_price,it.total_price,it.weight||0]);}// Auto-add or update customer record so every buyer shows in the customers page.
+  const o=await pool.query('INSERT INTO orders(store_id,customer_id,order_number,customer_name,customer_phone,customer_email,shipping_address,shipping_city,shipping_wilaya,shipping_zip,subtotal,shipping_cost,discount,total,payment_method,notes,notification_preference,shipping_type,preferred_delivery_company_id,status,original_subtotal,offer_discount,coupon_discount,coupon_code,pricing_snapshot) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25::jsonb) RETURNING *',[sid,customer_id||null,num,customer_name,customer_phone,customer_email||null,shipping_address,shipping_city||null,shipping_wilaya||null,shipping_zip||null,subtotal,ship,discount,total,payment_method||'cod',notes||null,notification_preference||'whatsapp',sType,prefDcId,initialStatus,quote.original_subtotal,quote.offer_discount,quote.coupon_discount,(quote.coupons[0]&&quote.coupons[0].code)||null,JSON.stringify(quote.snapshot)]).catch(async(err)=>{for(const id of claimed)await pricing.releaseCoupon(id);throw err;});try{await pool.query("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS weight NUMERIC DEFAULT 0");}catch(e){}for(const it of oi){await pool.query('INSERT INTO order_items(order_id,product_id,product_name,product_image,variant_info,quantity,unit_price,total_price,weight,original_unit_price,discount_amount,offer_id,offer_name,offer_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)',[o.rows[0].id,it.product_id,it.product_name,firstImg(it._product&&it._product.images),typeof it.variant_info==='string'?it.variant_info:(it.variant_info?JSON.stringify(it.variant_info):null),it.quantity,it.unit_price,it.total_price,it.weight||0,it.original_unit_price,it.line_discount,it.offer_id,it.offer_name,it.offer_type]);}
+  // What was redeemed, recorded once. These rows are what the reports read,
+  // so they keep telling the truth after an offer or coupon is deleted.
+  try{
+    for(const c of quote.coupons){
+      await pool.query('INSERT INTO coupon_redemptions(store_id,coupon_id,code,order_id,customer_id,customer_phone,discount_amount,order_total) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING',[sid,c.id||null,c.code,o.rows[0].id,customer_id||null,customer_phone||null,c.discount,total]);
+    }
+    for(const used of quote.offers_used){
+      await pricing.claimOffer(used.id);
+      await pool.query('INSERT INTO offer_redemptions(store_id,offer_id,offer_name,offer_type,order_id,customer_id,customer_phone,discount_amount,order_total) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING',[sid,used.id,used.name,used.offer_type,o.rows[0].id,customer_id||null,customer_phone||null,used.discount,total]);
+    }
+  }catch(e){console.log('[promotions redemption]',e.message);}// Auto-add or update customer record so every buyer shows in the customers page.
   try{require('../services/orderDistribution').autoAssignNew(store.id,o.rows[0].id);}catch(e){}
 // Registered buyers already have a row; guest checkouts get one created here.
 let custId = customer_id || null;
@@ -476,27 +483,116 @@ router.post('/:slug/orders/:oid/cancel',async(req,res)=>{try{
 }catch(e){res.status(500).json({error:e.message});}});
 
 // ═══ COUPON VALIDATION ═══
-router.post('/:slug/validate-coupon',async(req,res)=>{try{
-  const store=(await pool.query('SELECT id,config FROM stores WHERE slug=$1',[req.params.slug])).rows[0];
+// Price a cart. The cart page and the checkout both call this on every
+// change, so what the buyer reads and what the order charges come from one
+// calculation. Nothing about money in the request body is believed.
+// What delivery costs for this order: the wilaya's own desk/home rate, or the
+// price that wilaya sets for the chosen delivery company.
+async function shippingCostFor(store,b){
+  const sid=store.id;
+  const sType=String(b.shipping_type||'desk').toLowerCase();
+  const wilaya=b.shipping_wilaya;
+  const companyId=b.delivery_company_id||null;
+  let ship=400; // fallback when the store has set no rate at all
+  if(!wilaya)return ship;
+  try{
+    let wRow;
+    try{wRow=(await pool.query('SELECT desk_delivery_price,home_delivery_price,company_prices FROM shipping_wilayas WHERE store_id=$1 AND wilaya_name=$2',[sid,wilaya])).rows[0];}
+    catch{wRow=(await pool.query('SELECT desk_delivery_price,home_delivery_price FROM shipping_wilayas WHERE store_id=$1 AND wilaya_name=$2',[sid,wilaya])).rows[0];}
+    if(wRow){
+      let cp=wRow.company_prices;if(typeof cp==='string'){try{cp=JSON.parse(cp);}catch{cp={};}}
+      const perCompany=cp&&companyId?cp[companyId]:null;
+      if(perCompany)ship=sType==='home'?parseFloat(perCompany.home||perCompany.home_price||wRow.home_delivery_price||400):parseFloat(perCompany.desk||perCompany.desk_price||wRow.desk_delivery_price||400);
+      else ship=sType==='home'?parseFloat(wRow.home_delivery_price||400):parseFloat(wRow.desk_delivery_price||400);
+    }
+  }catch(e){}
+  return Number.isFinite(ship)?ship:400;
+}
+
+// Codes may arrive as one string or a list; stacking decides how many of
+// them actually count.
+function couponCodesFrom(b){
+  const out=[];
+  if(b.coupon_code)out.push(String(b.coupon_code));
+  if(Array.isArray(b.coupon_codes))b.coupon_codes.forEach(c=>out.push(String(c)));
+  return [...new Set(out.map(c=>c.trim()).filter(Boolean))];
+}
+
+const COUPON_MESSAGES={
+  invalid:'Invalid coupon',
+  disabled:'This coupon is no longer active',
+  expired:'This coupon has expired',
+  not_started:'This coupon is not active yet',
+  usage_limit:'This coupon has reached its usage limit',
+  customer_limit:'You have already used this coupon',
+  min_order:'Your order is below the minimum for this coupon',
+  min_quantity:'Add more items to use this coupon',
+  max_quantity:'This coupon does not apply to this many items',
+  not_eligible:'This coupon is not valid for these products',
+  stacking_disabled:'Only one coupon can be used at a time',
+  not_stackable:'This coupon cannot be combined with the one already applied',
+  no_discount:'This coupon gives no discount on this order',
+  race_lost:'This coupon has just run out',
+};
+
+router.post('/:slug/quote',async(req,res)=>{try{
+  const store=(await pool.query('SELECT * FROM stores WHERE slug=$1',[req.params.slug])).rows[0];
   if(!store)return res.status(404).json({error:'Store not found'});
-  const{code,subtotal}=req.body;
+  const b=req.body||{};
+  const ship=await shippingCostFor(store,b);
+  const q=await pricing.quoteCart(store,{
+    items:Array.isArray(b.items)?b.items:[],
+    couponCodes:couponCodesFrom(b),
+    shippingUnits:pricing.toUnits(ship),
+    customerId:b.customer_id||null,
+    customerPhone:b.customer_phone||null,
+    checkStock:false,
+  });
+  delete q._internal;
+  q.items=q.items.map(({_product,_unit_units,_discount_units,...rest})=>rest);
+  res.json(q);
+}catch(e){res.status(500).json({error:e.message});}});
+
+// One code, checked on its own, so the checkout can say exactly what is
+// wrong with it rather than "invalid".
+router.post('/:slug/validate-coupon',async(req,res)=>{try{
+  await ensurePromotionsSchema();
+  const store=(await pool.query('SELECT * FROM stores WHERE slug=$1',[req.params.slug])).rows[0];
+  if(!store)return res.status(404).json({error:'Store not found'});
+  const b=req.body||{};
+  const code=String(b.code||'').trim();
   if(!code)return res.status(400).json({error:'Coupon code required'});
-  const upper=String(code).trim().toUpperCase();
-  const cfg=store.config||{};
-  // Check store-wide coupons from config (primary + extra)
-  const sc=storeCouponDiscount(cfg,upper,subtotal);
-  if(sc)return res.json({valid:true,discount:sc.discount,type:'store_wide',discount_type:sc.type,value:sc.value,percent:sc.type==='percent'?sc.value:undefined});
-  // Check per-product coupons
-  const products=await pool.query('SELECT id,price,coupon_code,coupon_discount_percent,coupon_active FROM products WHERE store_id=$1 AND coupon_active=TRUE AND coupon_code IS NOT NULL',[store.id]);
-  const matching=products.rows.filter(p=>String(p.coupon_code||'').trim().toUpperCase()===upper);
-  if(matching.length>0){
-    const totalDiscount=matching.reduce((s,p)=>{
-      const pct=parseFloat(p.coupon_discount_percent)||0;
-      return s+Math.round((parseFloat(p.price)||0)*(pct/100));
-    },0);
-    if(totalDiscount>0)return res.json({valid:true,discount:totalDiscount,type:'product',count:matching.length});
-  }
-  res.status(404).json({error:'Invalid coupon'});
+  const items=Array.isArray(b.items)?b.items:[];
+  const codes=[...couponCodesFrom(b).filter(c=>c.toUpperCase()!==code.toUpperCase()),code];
+  const q=await pricing.quoteCart(store,{
+    items,couponCodes:codes,shippingUnits:pricing.toUnits(await shippingCostFor(store,b)),
+    customerId:b.customer_id||null,customerPhone:b.customer_phone||null,checkStock:false,
+  });
+  const failed=(q.coupon_errors||[]).find(e=>String(e.code).toUpperCase()===code.toUpperCase());
+  if(failed)return res.status(400).json({valid:false,error:failed.error,reason:failed.error,detail:failed.detail,message:COUPON_MESSAGES[failed.error]||'This coupon cannot be used'});
+  const applied=(q.coupons||[]).find(c=>String(c.code).toUpperCase()===code.toUpperCase());
+  if(!applied)return res.status(400).json({valid:false,error:'invalid',message:COUPON_MESSAGES.invalid});
+  delete q._internal;
+  q.items=q.items.map(({_product,_unit_units,_discount_units,...rest})=>rest);
+  res.json({valid:true,coupon:applied,discount:applied.discount,quote:q});
+}catch(e){res.status(500).json({error:e.message});}});
+
+// The offers a shopper may see: badges on the grid, the savings ladder on a
+// product page. Paused, finished and not-yet-started offers never appear.
+router.get('/:slug/offers',async(req,res)=>{try{
+  const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];
+  if(!store)return res.status(404).json({error:'Store not found'});
+  const rows=await pricing.liveOffers(store.id);
+  res.json({offers:rows.filter(o=>o.show_on_storefront!==false||o.show_on_product!==false).map(o=>({
+    id:o.id,name:o.name,description:o.description,offer_type:o.offer_type,scope:o.scope,
+    product_ids:o.product_ids,variant_keys:o.variant_keys,category_ids:o.category_ids,
+    discount_percent:o.discount_percent,discount_amount:o.discount_amount,
+    buy_quantity:o.buy_quantity,get_quantity:o.get_quantity,get_discount_percent:o.get_discount_percent,
+    tiers:o.tiers,offer_price:o.offer_price,min_quantity:o.min_quantity,max_quantity:o.max_quantity,
+    min_order_amount:o.min_order_amount,max_discount:o.max_discount,badge_text:o.badge_text,
+    show_on_product:o.show_on_product,show_on_storefront:o.show_on_storefront,show_at_checkout:o.show_at_checkout,
+    ends_at:o.ends_at,
+  }))});
 }catch(e){res.status(500).json({error:e.message});}});
 
 // Pages

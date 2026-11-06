@@ -161,6 +161,10 @@ const RULES = [
   ['*', /^\/stores\/:sid\/blacklist/, ['customers_blacklist']],
   // products
   ['GET', /^\/stores\/:sid\/(products|categories)$/, ['products_view', 'products_edit', 'stock_manage', 'orders_edit', 'offers_manage']],
+  // offers & coupons
+  ['GET', /^\/stores\/:sid\/(offers|promo-coupons)/, ['offers_manage', 'products_view', 'analytics_view']],
+  ['GET', /^\/stores\/:sid\/promotions\/analytics$/, ['offers_manage', 'analytics_view']],
+  ['*', /^\/stores\/:sid\/(offers|promo-coupons)/, ['offers_manage']],
   ['POST', /^\/stores\/:sid\/products$/, ['products_edit']],
   ['PUT', /^\/stores\/:sid\/products\/:pid$/, ['products_edit']],
   ['DELETE', /^\/stores\/:sid\/products\/:pid$/, ['products_delete']],

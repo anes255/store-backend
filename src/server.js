@@ -58,6 +58,7 @@ const routes=[
   ['/api/owner','./routes/storeOwner'],
   ['/api/manage','./routes/products'],
   ['/api/manage','./routes/orders'],
+  ['/api/manage','./routes/promotions'],
   ['/api/store','./routes/storefront'],
   ['/api/ai','./routes/ai'],
   ['/api/payments','./routes/payments'],
