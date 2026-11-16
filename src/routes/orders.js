@@ -67,6 +67,10 @@ router.get('/stores/:sid/orders',authMiddleware(['store_owner','store_staff']),a
   q+=" AND (status IS NULL OR status<>'pending_payment')";
   // Staff who may only see the orders assigned to them.
   if(req.staffPerms&&!req.staffPerms.has('orders_view')){p.push(req.staffRowId);q+=` AND assigned_staff_id=$${p.length}`;}
+  // A worker who may see everything still opens on their own work:
+  // ?assigned=me narrows the list to theirs, so the page they land on is
+  // the orders they have to do rather than the whole shop's.
+  else if(req.query.assigned==='me'&&req.staffRowId){p.push(req.staffRowId);q+=` AND assigned_staff_id=$${p.length}`;}
   if(status&&status!=='all'){
     if(status==='preparing'){q+=` AND status IN ('preparing','under_preparation')`;}
     else{p.push(status);q+=` AND status=$${p.length}`;}
