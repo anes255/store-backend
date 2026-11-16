@@ -18,7 +18,17 @@ router.use(async (req, res, next) => { try { await ensureWorkersSchema(); } catc
 
 const CURRENCIES = ['DZD', 'USD', 'EUR'];
 const RULE_TYPES = { fixed_monthly: null, per_confirmed: 'confirmed', per_prepared: 'prepared', per_completed: 'completed', per_shipped: 'shipped' };
-const PAID_ACTIONS = ['confirmed', 'prepared', 'completed', 'shipped'];
+// What each paid action really covers. Preparing an order and marking it
+// ready are the same piece of work, so one rule pays for either; counting
+// distinct orders keeps it at one commission per order whichever was used.
+const ACTION_GROUP = {
+  confirmed: ['confirmed'],
+  prepared: ['prepared', 'preparing'],
+  completed: ['completed'],
+  shipped: ['shipped'],
+};
+const PAID_ACTIONS = ['confirmed', 'prepared', 'preparing', 'completed', 'shipped'];
+const actionsFor = (a) => ACTION_GROUP[a] || (a ? [a] : []);
 const STATUSES = ['active', 'inactive', 'suspended', 'pending'];
 
 const DEFAULT_JOBS = ['Order Confirmer', 'Order Preparer', 'Customer Support', 'Sales', 'Accountant', 'Stock Manager', 'Delivery Manager', 'Manager'];
@@ -111,15 +121,32 @@ async function computeEarnings(sid, year, month, staffIds = null) {
     `SELECT * FROM worker_compensation_rules WHERE store_id=$1 AND is_active=TRUE ${staffIds ? 'AND staff_id = ANY($2::uuid[])' : ''} ORDER BY created_at`,
     staffIds ? [sid, staffIds] : [sid]
   )).rows;
-  const counts = (await pool.query(
-    `SELECT staff_id, action, COUNT(DISTINCT order_id)::int AS n FROM worker_order_actions
+  // One row per order per action, so an order that moved through several
+  // statuses is still a single order when the groups above are added up.
+  const acts = (await pool.query(
+    `SELECT DISTINCT staff_id, action, order_id FROM worker_order_actions
      WHERE store_id=$1 AND staff_id IS NOT NULL AND action = ANY($4::text[])
        AND created_at >= make_timestamptz($2,$3,1,0,0,0,'Africa/Algiers')
-       AND created_at <  make_timestamptz($2,$3,1,0,0,0,'Africa/Algiers') + INTERVAL '1 month'
-     GROUP BY staff_id, action`,
+       AND created_at <  make_timestamptz($2,$3,1,0,0,0,'Africa/Algiers') + INTERVAL '1 month'`,
     [sid, year, month, PAID_ACTIONS]
   )).rows;
-  const cnt = {}; counts.forEach((c) => { (cnt[c.staff_id] = cnt[c.staff_id] || {})[c.action] = c.n; });
+  const orderSets = {}; // staff -> action -> Set(order_id)
+  for (const a of acts) {
+    const byAction = (orderSets[a.staff_id] = orderSets[a.staff_id] || {});
+    (byAction[a.action] = byAction[a.action] || new Set()).add(String(a.order_id));
+  }
+  // How many distinct orders a paid action covers for one worker.
+  const countFor = (staffId, action) => {
+    const byAction = orderSets[staffId] || {};
+    const seen = new Set();
+    for (const key of actionsFor(action)) for (const id of (byAction[key] || [])) seen.add(id);
+    return seen.size;
+  };
+  const cnt = {};
+  for (const staffId of Object.keys(orderSets)) {
+    cnt[staffId] = {};
+    for (const action of Object.keys(ACTION_GROUP)) cnt[staffId][action] = countFor(staffId, action);
+  }
   const out = {};
   for (const r of rules) {
     const cur = CURRENCIES.includes(r.currency) ? r.currency : 'DZD';
@@ -130,7 +157,7 @@ async function computeEarnings(sid, year, month, staffIds = null) {
       slot.lines.push({ rule_id: r.id, type: r.rule_type, label: r.label, rate: amount, count: 1, amount, currency: cur });
     } else {
       const action = RULE_TYPES[r.rule_type];
-      const n = action ? (cnt[r.staff_id]?.[action] || 0) : 0;
+      const n = action ? countFor(r.staff_id, action) : 0;
       slot.commission += n * amount;
       slot.lines.push({ rule_id: r.id, type: r.rule_type, action, label: r.label, rate: amount, count: n, amount: money(n * amount), currency: cur });
     }
@@ -1086,14 +1113,15 @@ router.get('/stores/:sid/payroll/items/:iid/orders', auth, async (req, res) => {
     const item = await itemFor(req);
     if (!item) return res.status(404).json({ error: 'Not found' });
     const period = (await pool.query('SELECT year, month FROM payroll_periods WHERE id=$1', [item.period_id])).rows[0];
-    const action = PAID_ACTIONS.includes(req.query.action) ? req.query.action : 'confirmed';
+    const action = Object.keys(ACTION_GROUP).includes(req.query.action) ? req.query.action : 'confirmed';
+    const actionKeys = actionsFor(action);
     const limit = Math.min(200, parseInt(req.query.limit) || 50), offset = Math.max(0, parseInt(req.query.offset) || 0);
     const base = `FROM worker_order_actions a LEFT JOIN orders o ON o.id=a.order_id
-      WHERE a.store_id=$1 AND a.staff_id=$2 AND a.action=$3
+      WHERE a.store_id=$1 AND a.staff_id=$2 AND a.action = ANY($3::text[])
         AND a.created_at >= make_timestamptz($4,$5,1,0,0,0,'Africa/Algiers') AND a.created_at < make_timestamptz($4,$5,1,0,0,0,'Africa/Algiers') + INTERVAL '1 month'
         AND ($6::timestamptz IS NULL OR a.created_at <= $6::timestamptz)`;
     // a locked line lists exactly the orders it was calculated from
-    const args = [req.params.sid, item.staff_id, action, period.year, period.month, item.locked ? (item.calculated_at || item.approved_at) : null];
+    const args = [req.params.sid, item.staff_id, actionKeys, period.year, period.month, item.locked ? (item.calculated_at || item.approved_at) : null];
     const total = (await pool.query(`SELECT COUNT(DISTINCT a.order_id)::int AS n ${base}`, args)).rows[0].n;
     const rows = (await pool.query(`SELECT DISTINCT ON (a.order_id) a.order_id, a.order_number, a.created_at, o.customer_name, o.total, o.status ${base} ORDER BY a.order_id, a.created_at LIMIT ${limit} OFFSET ${offset}`, args)).rows;
     res.json({ action, total, orders: rows });

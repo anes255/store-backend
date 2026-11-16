@@ -11,6 +11,7 @@ const STATUS_ACTION = {
   ready: 'prepared', prepared: 'prepared',
   preparing: 'preparing', under_preparation: 'preparing',
   shipped: 'shipped',
+  delivered: 'completed', completed: 'completed',
   cancelled: 'cancelled', canceled: 'cancelled', rejected: 'cancelled',
 };
 

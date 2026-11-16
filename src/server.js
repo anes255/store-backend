@@ -54,6 +54,7 @@ app.get('/api/platform-info',async(req,res)=>{try{const r=await pool.query('SELE
 
 // Load routes
 const routes=[
+  ['/api/platform','./routes/platformMedia'],
   ['/api/platform','./routes/platformAdmin'],
   ['/api/owner','./routes/storeOwner'],
   ['/api/manage','./routes/products'],
