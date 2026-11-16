@@ -332,6 +332,10 @@ router.post('/:slug/orders',async(req,res)=>{try{
   if(!items||!items.length)return res.status(400).json({error:'Cart empty'});
   if(!customer_name||!customer_phone||!shipping_address)return res.status(400).json({error:'Info required'});
   const sType=(shipping_type||'desk').toLowerCase();
+  // The store's settings, used further down for the order-number format and
+  // the confirmation messages.
+  let storeCfg=store.config||{};
+  if(typeof storeCfg==='string'){try{storeCfg=JSON.parse(storeCfg);}catch{storeCfg={};}}
 
   // Everything about money is worked out here, from the store's own rows --
   // the same call the cart and the checkout used to show their figures.
@@ -378,7 +382,10 @@ router.post('/:slug/orders',async(req,res)=>{try{
   const oi=quote.items;
   const pm=(payment_method||'cod').toLowerCase();
   const isNonCod=['ccp','baridimob','bank_transfer'].includes(pm);
-  const total=subtotal+ship-discount;const num=parseInt((await pool.query('SELECT COALESCE(MAX(order_number),0)+1 as n FROM orders WHERE store_id=$1',[sid])).rows[0].n);const prefDcId=delivery_company_id||null;
+  // The subtotal already has the offers taken off it, so subtracting the
+  // discount again here charged the offer twice. The quote's own total is
+  // the figure the checkout showed.
+  const total=quote.total;const num=parseInt((await pool.query('SELECT COALESCE(MAX(order_number),0)+1 as n FROM orders WHERE store_id=$1',[sid])).rows[0].n);const prefDcId=delivery_company_id||null;
   const initialStatus=(pm==='ccp'||pm==='baridimob')?'pending_payment':'new_order';
   const o=await pool.query('INSERT INTO orders(store_id,customer_id,order_number,customer_name,customer_phone,customer_email,shipping_address,shipping_city,shipping_wilaya,shipping_zip,subtotal,shipping_cost,discount,total,payment_method,notes,notification_preference,shipping_type,preferred_delivery_company_id,status,original_subtotal,offer_discount,coupon_discount,coupon_code,pricing_snapshot) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25::jsonb) RETURNING *',[sid,customer_id||null,num,customer_name,customer_phone,customer_email||null,shipping_address,shipping_city||null,shipping_wilaya||null,shipping_zip||null,subtotal,ship,discount,total,payment_method||'cod',notes||null,notification_preference||'whatsapp',sType,prefDcId,initialStatus,quote.original_subtotal,quote.offer_discount,quote.coupon_discount,(quote.coupons[0]&&quote.coupons[0].code)||null,JSON.stringify(quote.snapshot)]).catch(async(err)=>{for(const id of claimed)await pricing.releaseCoupon(id);throw err;});try{await pool.query("ALTER TABLE order_items ADD COLUMN IF NOT EXISTS weight NUMERIC DEFAULT 0");}catch(e){}for(const it of oi){await pool.query('INSERT INTO order_items(order_id,product_id,product_name,product_image,variant_info,quantity,unit_price,total_price,weight,original_unit_price,discount_amount,offer_id,offer_name,offer_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)',[o.rows[0].id,it.product_id,it.product_name,firstImg(it._product&&it._product.images),typeof it.variant_info==='string'?it.variant_info:(it.variant_info?JSON.stringify(it.variant_info):null),it.quantity,it.unit_price,it.total_price,it.weight||0,it.original_unit_price,it.line_discount,it.offer_id,it.offer_name,it.offer_type]);}
   // What was redeemed, recorded once. These rows are what the reports read,
