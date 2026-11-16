@@ -908,15 +908,25 @@ router.put('/stores/:sid/orders/auto-distribute/settings', auth, async (req, res
     const b = req.body || {};
     const cfg = await storeCfg(req.params.sid);
     cfg.auto_distribute = {
+      ...(cfg.auto_distribute || {}),
       enabled: !!b.enabled,
       worker_ids: (Array.isArray(b.worker_ids) ? b.worker_ids : []).filter(isUuid).slice(0, 200),
-      per_worker: Math.max(1, Math.min(500, parseInt(b.per_worker, 10) || 5)),
-      min_waiting: Math.max(1, Math.min(5000, parseInt(b.min_waiting, 10) || 10)),
+      every_minutes: Math.max(1, Math.min(1440, parseInt(b.every_minutes, 10) || 30)),
       include_call_failed: !!b.include_call_failed,
     };
     await saveStoreCfg(req.params.sid, cfg);
     await audit(req.params.sid, req, 'auto_distribute_updated', 'settings', null, { after: cfg.auto_distribute });
     res.json(cfg.auto_distribute);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Run the round now instead of waiting for the next one.
+router.post('/stores/:sid/orders/auto-distribute/run', auth, async (req, res) => {
+  try {
+    const { runStoreDistribution } = require('../services/orderDistribution');
+    const r = await runStoreDistribution(req.params.sid, { force: true });
+    if (!r) return res.status(400).json({ error: 'Automatic distribution is switched off' });
+    res.json(r);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

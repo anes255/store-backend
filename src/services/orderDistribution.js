@@ -74,33 +74,64 @@ async function readDistributeSettings(storeId) {
   return {
     enabled: !!a.enabled,
     worker_ids: Array.isArray(a.worker_ids) ? a.worker_ids.filter(isUuid) : [],
-    // how many each worker gets in one go
-    per_worker: Math.max(1, Math.min(500, parseInt(a.per_worker, 10) || 5)),
-    // nothing happens until this many are waiting
-    min_waiting: Math.max(1, Math.min(5000, parseInt(a.min_waiting, 10) || 10)),
+    // how often the shop looks at what has come in
+    every_minutes: Math.max(1, Math.min(1440, parseInt(a.every_minutes, 10) || 30)),
     include_call_failed: !!a.include_call_failed,
+    last_run_at: a.last_run_at || null,
   };
 }
 
-// Called when the pile may have grown. Hands out one batch, no more: if
-// enough orders remain for another, the next arrival triggers it, so a sudden
-// rush does not empty the queue onto one worker in a single pass.
-async function autoDistributeIfDue(storeId) {
+async function writeLastRun(storeId, when) {
+  const r = await pool.query('SELECT config FROM stores WHERE id=$1', [storeId]);
+  let c = r.rows[0]?.config || {}; if (typeof c === 'string') { try { c = JSON.parse(c); } catch { c = {}; } }
+  c.auto_distribute = { ...(c.auto_distribute || {}), last_run_at: when };
+  await pool.query('UPDATE stores SET config=$1::jsonb WHERE id=$2', [JSON.stringify(c), storeId]);
+}
+
+// Every so often, share out whatever has come in.
+//
+// The shop sets how often it looks -- half an hour, say. Each time, however
+// many orders are waiting are split evenly between the chosen workers: eight
+// over two workers is four each, twenty over two is ten each. Nobody is
+// handed one order at a time all day, and nobody has to remember to press
+// Distribute.
+async function runStoreDistribution(storeId, { force = false } = {}) {
+  const st = await readDistributeSettings(storeId);
+  if (!st.enabled) return null;
+  if (!force && st.last_run_at) {
+    const due = new Date(st.last_run_at).getTime() + st.every_minutes * 60000;
+    if (Date.now() < due) return null;
+  }
+  const now = new Date().toISOString();
+  // The clock is marked before anything is handed out, so a slow run cannot
+  // be started twice.
+  await writeLastRun(storeId, now);
+
+  const waiting = await waitingCount(storeId, st.include_call_failed);
+  if (!waiting) return { assigned: 0, available: 0, workers: [] };
+  const workers = await activeWorkers(storeId, st.worker_ids);
+  if (!workers.length) return { assigned: 0, available: waiting, workers: [] };
+
+  // `total` splits evenly, which is exactly the rule the shop asked for.
+  return distribute(storeId, {
+    workerIds: workers.map((w) => w.id),
+    total: waiting,
+    includeCallFailed: st.include_call_failed,
+    actor: 'auto',
+  });
+}
+
+// Walks the stores that have this switched on. Called on a timer by the
+// server, and cheap when nobody uses the feature: one indexed query.
+async function runDueDistributions() {
   try {
-    const st = await readDistributeSettings(storeId);
-    if (!st.enabled) return null;
-    const waiting = await waitingCount(storeId, st.include_call_failed);
-    if (waiting < st.min_waiting) return null;
-    const workers = await activeWorkers(storeId, st.worker_ids);
-    if (!workers.length) return null;
-    const r = await distribute(storeId, {
-      workerIds: workers.map((w) => w.id),
-      perWorker: st.per_worker,
-      includeCallFailed: st.include_call_failed,
-      actor: 'auto',
-    });
-    return r && r.assigned ? r : null;
-  } catch (e) { console.log('[auto-distribute]', e.message); return null; }
+    const r = await pool.query(
+      `SELECT id FROM stores WHERE config -> 'auto_distribute' ->> 'enabled' = 'true' LIMIT 500`);
+    for (const row of r.rows) {
+      try { await runStoreDistribution(row.id); }
+      catch (e) { console.log('[auto-distribute]', row.id, e.message); }
+    }
+  } catch (e) { console.log('[auto-distribute sweep]', e.message); }
 }
 
 async function readSettings(storeId) {
@@ -128,4 +159,4 @@ async function autoAssignNew(storeId, orderId) {
   } catch (e) { console.log('[auto-assign]', e.message); return null; }
 }
 
-module.exports = { distribute, autoAssignNew, readSettings, waitingCount, readDistributeSettings, autoDistributeIfDue, isUuid };
+module.exports = { distribute, autoAssignNew, readSettings, waitingCount, readDistributeSettings, runStoreDistribution, runDueDistributions, isUuid };

@@ -334,6 +334,14 @@ setInterval(runFullSync,10*60*1000);
 setTimeout(runFullSync,60000);
 console.log('✅ Carrier sync cron started (every 10min — syncs orders from carriers + updates tracking)');
 
+// ═══ AUTOMATIC ORDER DISTRIBUTION (checked every minute) ═══
+// The sweep runs often; each shop only acts when its own period is up (half
+// an hour by default), so a minute here is just the resolution of the clock.
+const{runDueDistributions}=require('./services/orderDistribution');
+setInterval(runDueDistributions,60*1000);
+setTimeout(runDueDistributions,45000);
+console.log('✅ Auto-distribution cron started (checked every 1min — each store shares out its waiting orders on its own period)');
+
 // ═══ STORE PURGE CRON (every hour) ═══
 const{runStorePurge,runCustomerPurge}=require('./services/storePurge');
 const runPurges=async()=>{await runStorePurge();await runCustomerPurge();};
