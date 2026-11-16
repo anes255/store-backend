@@ -399,7 +399,13 @@ router.post('/:slug/orders',async(req,res)=>{try{
       await pool.query('INSERT INTO offer_redemptions(store_id,offer_id,offer_name,offer_type,order_id,customer_id,customer_phone,discount_amount,order_total) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT DO NOTHING',[sid,used.id,used.name,used.offer_type,o.rows[0].id,customer_id||null,customer_phone||null,used.discount,total]);
     }
   }catch(e){console.log('[promotions redemption]',e.message);}// Auto-add or update customer record so every buyer shows in the customers page.
-  try{require('../services/orderDistribution').autoAssignNew(store.id,o.rows[0].id);}catch(e){}
+  try{
+    const dist=require('../services/orderDistribution');
+    dist.autoAssignNew(store.id,o.rows[0].id);
+    // and, if the shop hands orders out in batches, see whether this one
+    // tipped the pile over the threshold
+    dist.autoDistributeIfDue(store.id).catch(()=>{});
+  }catch(e){}
 // Registered buyers already have a row; guest checkouts get one created here.
 let custId = customer_id || null;
 if (custId) {

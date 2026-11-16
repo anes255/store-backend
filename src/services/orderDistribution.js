@@ -67,6 +67,42 @@ async function waitingCount(storeId, includeCallFailed = false) {
   return r.rows[0]?.n || 0;
 }
 
+async function readDistributeSettings(storeId) {
+  const r = await pool.query('SELECT config FROM stores WHERE id=$1', [storeId]);
+  let c = r.rows[0]?.config || {}; if (typeof c === 'string') { try { c = JSON.parse(c); } catch { c = {}; } }
+  const a = c.auto_distribute || {};
+  return {
+    enabled: !!a.enabled,
+    worker_ids: Array.isArray(a.worker_ids) ? a.worker_ids.filter(isUuid) : [],
+    // how many each worker gets in one go
+    per_worker: Math.max(1, Math.min(500, parseInt(a.per_worker, 10) || 5)),
+    // nothing happens until this many are waiting
+    min_waiting: Math.max(1, Math.min(5000, parseInt(a.min_waiting, 10) || 10)),
+    include_call_failed: !!a.include_call_failed,
+  };
+}
+
+// Called when the pile may have grown. Hands out one batch, no more: if
+// enough orders remain for another, the next arrival triggers it, so a sudden
+// rush does not empty the queue onto one worker in a single pass.
+async function autoDistributeIfDue(storeId) {
+  try {
+    const st = await readDistributeSettings(storeId);
+    if (!st.enabled) return null;
+    const waiting = await waitingCount(storeId, st.include_call_failed);
+    if (waiting < st.min_waiting) return null;
+    const workers = await activeWorkers(storeId, st.worker_ids);
+    if (!workers.length) return null;
+    const r = await distribute(storeId, {
+      workerIds: workers.map((w) => w.id),
+      perWorker: st.per_worker,
+      includeCallFailed: st.include_call_failed,
+      actor: 'auto',
+    });
+    return r && r.assigned ? r : null;
+  } catch (e) { console.log('[auto-distribute]', e.message); return null; }
+}
+
 async function readSettings(storeId) {
   const r = await pool.query('SELECT config FROM stores WHERE id=$1', [storeId]);
   let c = r.rows[0]?.config || {}; if (typeof c === 'string') { try { c = JSON.parse(c); } catch { c = {}; } }
@@ -92,4 +128,4 @@ async function autoAssignNew(storeId, orderId) {
   } catch (e) { console.log('[auto-assign]', e.message); return null; }
 }
 
-module.exports = { distribute, autoAssignNew, readSettings, waitingCount, isUuid };
+module.exports = { distribute, autoAssignNew, readSettings, waitingCount, readDistributeSettings, autoDistributeIfDue, isUuid };

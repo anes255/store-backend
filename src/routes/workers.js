@@ -896,6 +896,30 @@ router.post('/stores/:sid/orders/auto-assign', auth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Automatic batch distribution: hand out N each once a pile has built up.
+// Separate from the per-order automatic assignment below.
+router.get('/stores/:sid/orders/auto-distribute/settings', auth, async (req, res) => {
+  try { res.json(await require('../services/orderDistribution').readDistributeSettings(req.params.sid)); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+router.put('/stores/:sid/orders/auto-distribute/settings', auth, async (req, res) => {
+  try {
+    const { isUuid } = require('../services/orderDistribution');
+    const b = req.body || {};
+    const cfg = await storeCfg(req.params.sid);
+    cfg.auto_distribute = {
+      enabled: !!b.enabled,
+      worker_ids: (Array.isArray(b.worker_ids) ? b.worker_ids : []).filter(isUuid).slice(0, 200),
+      per_worker: Math.max(1, Math.min(500, parseInt(b.per_worker, 10) || 5)),
+      min_waiting: Math.max(1, Math.min(5000, parseInt(b.min_waiting, 10) || 10)),
+      include_call_failed: !!b.include_call_failed,
+    };
+    await saveStoreCfg(req.params.sid, cfg);
+    await audit(req.params.sid, req, 'auto_distribute_updated', 'settings', null, { after: cfg.auto_distribute });
+    res.json(cfg.auto_distribute);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // How many unassigned new orders are waiting right now.
 router.get('/stores/:sid/orders/auto-assign/available', auth, async (req, res) => {
   try {
