@@ -606,64 +606,9 @@ router.get('/:slug/offers',async(req,res)=>{try{
 router.get('/:slug/pages',async(req,res)=>{try{const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];if(!store)return res.json([]);res.json((await pool.query('SELECT * FROM store_pages WHERE store_id=$1 AND is_published=TRUE',[store.id])).rows);}catch(e){res.json([]);}});
 
 // ═══ PRODUCT REVIEWS (public) ═══
-// Get approved reviews for a product
-router.get('/:slug/products/:pslug/reviews',async(req,res)=>{try{
-  const store=(await pool.query('SELECT id FROM stores WHERE slug=$1',[req.params.slug])).rows[0];
-  if(!store)return res.json({reviews:[],stats:{}});
-  const product=(await pool.query('SELECT id FROM products WHERE store_id=$1 AND slug=$2',[store.id,req.params.pslug])).rows[0];
-  if(!product)return res.json({reviews:[],stats:{}});
-  const reviews=await pool.query('SELECT id,customer_name,rating,title,content,created_at FROM reviews WHERE product_id=$1 AND is_approved=TRUE ORDER BY created_at DESC LIMIT 50',[product.id]);
-  const stats=await pool.query('SELECT COUNT(*) as total,ROUND(AVG(rating),1) as avg_rating,COUNT(*) FILTER(WHERE rating=5) as r5,COUNT(*) FILTER(WHERE rating=4) as r4,COUNT(*) FILTER(WHERE rating=3) as r3,COUNT(*) FILTER(WHERE rating=2) as r2,COUNT(*) FILTER(WHERE rating=1) as r1 FROM reviews WHERE product_id=$1 AND is_approved=TRUE',[product.id]);
-  res.json({reviews:reviews.rows,stats:stats.rows[0]||{}});
-}catch(e){res.json({reviews:[],stats:{}});}});
-
-// Submit a review
-router.post('/:slug/products/:pslug/reviews',async(req,res)=>{try{
-  const store=(await pool.query('SELECT id,config FROM stores WHERE slug=$1',[req.params.slug])).rows[0];
-  if(!store)return res.status(404).json({error:'Store not found'});
-  const product=(await pool.query('SELECT id,name FROM products WHERE store_id=$1 AND slug=$2',[store.id,req.params.pslug])).rows[0];
-  if(!product)return res.status(404).json({error:'Product not found'});
-  const{customer_name,customer_phone,rating,title,content}=req.body;
-  if(!customer_name||!rating)return res.status(400).json({error:'Name and rating required'});
-  if(rating<1||rating>5)return res.status(400).json({error:'Rating must be 1-5'});
-  // Verified buyers only: the phone must belong to an order in this store
-  // that contains this product and wasn't cancelled/returned.
-  const phoneDigits=String(customer_phone||'').replace(/\D/g,'');
-  if(phoneDigits.length<9)return res.status(400).json({error:'Enter the phone number you used to order this product.',code:'phone_required'});
-  const tail=phoneDigits.slice(-9);
-  const bought=await pool.query(`SELECT 1 FROM orders o JOIN order_items oi ON oi.order_id=o.id
-    WHERE o.store_id=$1 AND oi.product_id=$2 AND RIGHT(regexp_replace(COALESCE(o.customer_phone,''),'\\D','','g'),9)=$3
-      AND LOWER(COALESCE(o.status,'')) NOT IN ('cancelled','canceled','returned','refunded','failed') AND o.is_deleted IS NOT TRUE LIMIT 1`,[store.id,product.id,tail]);
-  if(!bought.rows.length)return res.status(403).json({error:'Only customers who bought this product can review it. Use the phone number from your order.',code:'not_a_buyer'});
-  const already=await pool.query(`SELECT 1 FROM reviews WHERE store_id=$1 AND product_id=$2 AND RIGHT(regexp_replace(COALESCE(customer_phone,''),'\\D','','g'),9)=$3 LIMIT 1`,[store.id,product.id,tail]);
-  if(already.rows.length)return res.status(409).json({error:'You have already reviewed this product.',code:'already_reviewed'});
-
-  // Check if customer already reviewed this product
-  if(customer_phone){
-    const dup=await pool.query('SELECT id FROM reviews WHERE product_id=$1 AND customer_phone=$2',[product.id,customer_phone]);
-    if(dup.rows.length)return res.status(409).json({error:'You already reviewed this product'});
-  }
-
-  // AI moderation if enabled
-  let aiScore=null,aiReason=null,autoApprove=false;
-  const cfg=store.config||{};
-  if(cfg.smart_reviews){
-    try{
-      const chatbot=require('../services/chatbot');
-      const mod=await chatbot.moderateReview(content||'',rating);
-      aiScore=mod.score;
-      aiReason=mod.reason;
-      autoApprove=mod.score>=70; // Auto-approve if AI score >= 70
-    }catch(e){console.log('[Review AI Error]',e.message);}
-  }
-
-  const r=await pool.query(
-    'INSERT INTO reviews(store_id,product_id,customer_name,customer_phone,rating,title,content,is_approved,ai_moderation_score,ai_moderation_reason) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *',
-    [store.id,product.id,customer_name,customer_phone||null,rating,title||null,content||null,autoApprove,aiScore,aiReason]
-  );
-  try{const{notifyStore}=require('../services/notify');notifyStore(store.id,{type:'review',title:`New ${rating}★ review: ${product.name||''}`.trim(),message:`${customer_name||''}${autoApprove?'':' (awaiting approval)'}`,link:'/dashboard/smart-reviews?highlight='+r.rows[0].id});}catch(e){}
-  res.status(201).json({...r.rows[0],auto_approved:autoApprove});
-}catch(e){res.status(500).json({error:e.message});}});
+// Reviews moved to routes/reviewsPublic.js, mounted on this same prefix:
+// the same two paths, the same rules, plus the five criteria, media,
+// filters and paging.
 
 // ═══ CART SYNC (for abandoned cart recovery) ═══
 router.post('/:slug/save-cart',async(req,res)=>{try{

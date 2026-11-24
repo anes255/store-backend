@@ -171,6 +171,10 @@ const RULES = [
   ['PATCH', /^\/stores\/:sid\/products\/:pid\/stock$/, ['stock_manage', 'products_edit']],
   ['POST', /^\/stores\/:sid\/categories$/, ['products_edit']],
   ['*', /^\/stores\/:sid\/reviews/, ['reviews_manage']],
+  ['GET', /^\/stores\/:sid\/(review-analytics|review-keywords|review-insights)$/, ['reviews_manage', 'analytics_view']],
+  ['GET', /^\/stores\/:sid\/products\/:pid\/review-stats$/, ['reviews_manage', 'products_view', 'analytics_view']],
+  ['GET', /^\/stores\/:sid\/review-settings$/, ['reviews_manage', 'settings_view']],
+  ['PUT', /^\/stores\/:sid\/review-settings$/, ['reviews_manage', 'settings_edit']],
   // shipping
   ['GET', /^\/stores\/:sid\/(shipping-wilayas|delivery-companies)$/, ['shipping_manage', 'shipping_partners', 'orders_view', 'tracking_view']],
   ['*', /^\/stores\/:sid\/shipping-wilayas/, ['shipping_manage']],

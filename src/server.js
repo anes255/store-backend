@@ -60,6 +60,8 @@ const routes=[
   ['/api/manage','./routes/products'],
   ['/api/manage','./routes/orders'],
   ['/api/manage','./routes/promotions'],
+  ['/api/manage','./routes/reviewsAdmin'],
+  ['/api/store','./routes/reviewsPublic'],
   ['/api/store','./routes/storefront'],
   ['/api/ai','./routes/ai'],
   ['/api/payments','./routes/payments'],
@@ -333,6 +335,14 @@ const{runFullSync}=require('./services/carrierSync');
 setInterval(runFullSync,10*60*1000);
 setTimeout(runFullSync,60000);
 console.log('✅ Carrier sync cron started (every 10min — syncs orders from carriers + updates tracking)');
+
+// ═══ REVIEW REQUESTS (checked every 30 minutes) ═══
+// Each shop asks its own number of days after delivery, so half an hour is
+// plenty of resolution and costs one indexed query when nobody uses it.
+const{runReviewRequests}=require('./services/reviewRequests');
+setInterval(runReviewRequests,30*60*1000);
+setTimeout(runReviewRequests,120000);
+console.log('✅ Review request cron started (every 30min — asks for a review the configured number of days after delivery)');
 
 // ═══ AUTOMATIC ORDER DISTRIBUTION (checked every minute) ═══
 // The sweep runs often; each shop only acts when its own period is up (half

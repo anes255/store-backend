@@ -1726,13 +1726,22 @@ router.put('/stores/:sid/delivery-companies/:did',authMiddleware(['store_owner']
 
 // ═══ REVIEWS CRUD (store owner) ═══
 router.get('/stores/:sid/reviews',authMiddleware(['store_owner']),async(req,res)=>{try{
+  await require('../config/reviewsSchema').ensureReviewsSchema();
   const{filter}=req.query;
-  let q='SELECT r.*,p.name as product_name FROM reviews r LEFT JOIN products p ON p.id=r.product_id WHERE r.store_id=$1';
-  if(filter==='pending')q+=' AND r.is_approved=FALSE AND r.is_rejected=FALSE';
-  else if(filter==='approved')q+=' AND r.is_approved=TRUE';
-  else if(filter==='rejected')q+=' AND r.is_rejected=TRUE';
-  q+=' ORDER BY r.created_at DESC LIMIT 100';
-  const r=await pool.query(q,[req.params.sid]);
+  const limit=Math.min(200,Math.max(1,parseInt(req.query.limit,10)||100));
+  const offset=Math.max(0,parseInt(req.query.offset,10)||0);
+  const p=[req.params.sid];
+  let q=`SELECT r.*, p.name as product_name,
+           COALESCE((SELECT json_agg(json_build_object('id',m.id,'kind',m.kind) ORDER BY m.position)
+                     FROM review_media m WHERE m.review_id=r.id),'[]'::json) AS media,
+           COALESCE((SELECT json_agg(json_build_object('reason',rr.reason,'note',rr.note,'created_at',rr.created_at) ORDER BY rr.created_at DESC)
+                     FROM review_reports rr WHERE rr.review_id=r.id),'[]'::json) AS reports
+         FROM reviews r LEFT JOIN products p ON p.id=r.product_id WHERE r.store_id=$1`;
+  if(filter&&filter!=='all'){p.push(filter);q+=` AND COALESCE(r.status, CASE WHEN r.is_rejected THEN 'rejected' WHEN r.is_approved THEN 'approved' ELSE 'pending' END)=$${p.length}`;}
+  if(req.query.q&&String(req.query.q).trim()){p.push(`%${String(req.query.q).trim()}%`);q+=` AND (r.customer_name ILIKE $${p.length} OR r.content ILIKE $${p.length} OR p.name ILIKE $${p.length})`;}
+  p.push(limit,offset);
+  q+=` ORDER BY r.created_at DESC LIMIT $${p.length-1} OFFSET $${p.length}`;
+  const r=await pool.query(q,p);
   const stats=await pool.query("SELECT COUNT(*) as total,COUNT(*) FILTER(WHERE is_approved) as approved,COUNT(*) FILTER(WHERE is_rejected) as rejected,COUNT(*) FILTER(WHERE NOT is_approved AND NOT is_rejected) as pending,ROUND(AVG(rating),1) as avg_rating FROM reviews WHERE store_id=$1",[req.params.sid]);
   res.json({reviews:r.rows,stats:stats.rows[0]});
 }catch(e){res.json({reviews:[],stats:{}});}});
